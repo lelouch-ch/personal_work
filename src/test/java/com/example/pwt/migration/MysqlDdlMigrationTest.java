@@ -301,6 +301,50 @@ class MysqlDdlMigrationTest {
     }
 
     /**
+     * 回归用例：原始用户输入必须走自然语言模式，不能用布尔模式（设计文档 11.3、8.4 第 10 条）。
+     *
+     * <p>实测 MySQL 9.3.0：布尔模式将输入里的 {@code ( + - "} 当作检索运算符解析，
+     * 未闭合的括号会让查询静默返回 0 行而不是报错。工作记录检索的入参是用户随手输入的原文，
+     * 因此 {@code WorkLogMapper#searchFullText} 固定使用自然语言模式；布尔模式仅在
+     * Context Builder 自行组装受控检索串时使用。
+     *
+     * @throws SQLException 数据库访问失败
+     */
+    @Test
+    void shouldLoseRecallWhenRawInputGoesThroughBooleanMode() throws SQLException {
+        String userId = insertUser("fts-mode");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.executeUpdate(workLogSql(userId, "上传文件失败排查", null));
+
+            assertThat(countMatch(statement, userId, "(上传", true)).as("布尔模式下未闭合括号会静默漏检").isZero();
+            assertThat(countMatch(statement, userId, "(上传", false)).as("自然语言模式把输入整体按词处理").isEqualTo(1);
+
+            assertThat(countMatch(statement, userId, "上传 文件", true)).isEqualTo(1);
+            assertThat(countMatch(statement, userId, "上传 文件", false)).isEqualTo(1);
+        }
+    }
+
+    /**
+     * 统计全文检索命中数。
+     *
+     * @param statement 语句对象
+     * @param userId    用户过滤条件
+     * @param phrase    检索串
+     * @param booleanMode true 使用布尔模式
+     * @return 命中行数
+     * @throws SQLException 数据库访问失败
+     */
+    private static int countMatch(Statement statement, String userId, String phrase, boolean booleanMode)
+        throws SQLException {
+        String mode = booleanMode ? "IN BOOLEAN MODE" : "IN NATURAL LANGUAGE MODE";
+        try (ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM pt_work_log WHERE user_id = '"
+            + userId + "' AND MATCH(title, summary, content) AGAINST('" + phrase + "' " + mode + ")")) {
+            assertThat(rs.next()).isTrue();
+            return rs.getInt(1);
+        }
+    }
+
+    /**
      * 校验标签检索确实走多值索引，而不是退化为全表扫描。
      *
      * <p>索引存在但未被使用不会报错，只会让查询变慢，因此必须用 {@code EXPLAIN} 断言。

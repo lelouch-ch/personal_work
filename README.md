@@ -3,11 +3,11 @@
 个人工作记忆与进化系统。设计基线见 `Personal_Work_Twin_完整技术设计文档_v1.1_mysql.md`（MySQL 版），
 v1.0 为 PostgreSQL 历史版本。
 
-当前进度：**M1 身份体系 + M2 Profile/Resume/Project 已完成**
+当前进度：**M1 身份体系 + M2 Profile/Resume/Project + M3 Work Log 已完成**
 （Spring Boot 3.2.2 + MyBatis-Plus + MySQL + Flyway），已在 `192.168.124.108`（MySQL 9.3.0）
 完成建库、迁移与端到端验证。
 
-测试：`mvn clean test` 71 个用例全绿（含指定数据库后端时的 13 个 DDL 用例，见「构建与测试」）。
+测试：`mvn clean test` 97 个用例全绿（含指定数据库后端时的 14 个 DDL 用例，见「构建与测试」）。
 
 ## 环境要求
 
@@ -46,10 +46,14 @@ mvn -s $MVN clean test          # 单元与契约测试；DDL 冒烟测试此时
 mvn -s $MVN -DskipTests package
 ```
 
+中文日志的编码已在工程内固化，无需再设 `MAVEN_OPTS`：`.mvn/jvm.config` 把 Maven 进程固定为 UTF-8，
+`pom.xml` 的 surefire `argLine` 把测试子进程同样固定为 UTF-8。二者缺一不可——本机 Java 默认
+`file.encoding=GBK`（活动代码页 936），只设其一时测试输出仍会被另一侧重新编码成乱码。
+
 ### DDL 冒烟测试（需真实 MySQL）
 
-`MysqlDdlMigrationTest` 会验证 ngram 中文检索、STORED 生成列唯一约束、多值索引、CHECK 约束、
-外键与 `FOR UPDATE SKIP LOCKED`。它在独立临时库 `pwt_ddl_test` 中运行，结束后自动删除，
+`MysqlDdlMigrationTest` 会验证 ngram 中文检索与全文检索模式、STORED 生成列唯一约束、多值索引、
+CHECK 约束、外键与 `FOR UPDATE SKIP LOCKED`。它在独立临时库 `pwt_ddl_test` 中运行，结束后自动删除，
 不会触碰业务库。两种后端任选其一：
 
 ```powershell
@@ -106,10 +110,23 @@ Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/whoami `
 # 5. 撤销后立即失效
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/agent-clients/<clientId>/revoke `
   -Headers @{ Authorization = "Bearer $jwt" }
+
+# 6. 写工作记录（Agent 用 work:write 的 Key，同一 Idempotency-Key 重复提交不重复入库）
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/work-logs `
+  -Headers @{ Authorization = "Bearer $agent"; 'Idempotency-Key' = 'uuid-or-random' } `
+  -ContentType 'application/json; charset=utf-8' `
+  -Body '{"title":"完成上传链路改造","occurredAt":"2026-11-13T09:30:00+08:00","workType":"development","tags":["ASR"],"visibility":"agent"}'
+
+# 7. 读取与检索
+Invoke-RestMethod -Uri 'http://localhost:8080/api/v1/work-logs?size=20' -Headers @{ Authorization = "Bearer $jwt" }
+Invoke-RestMethod -Uri 'http://localhost:8080/api/v1/work-logs/search/by-tag?tag=asr' -Headers @{ Authorization = "Bearer $jwt" }
+Invoke-RestMethod -Uri 'http://localhost:8080/api/v1/work-logs/search/by-keyword?keyword=上传' -Headers @{ Authorization = "Bearer $jwt" }
 ```
 
-步骤 1–5 已全部实测通过（见「已验证」）。PowerShell 传 JSON 请求体时建议写入文件后用
-`--data "@file"` 或 `Get-Content -Raw`，避免反引号转义导致 400 请求体格式错误。
+步骤 1–7 已全部实测通过（见「已验证」）。PowerShell 传 JSON 请求体时建议写入文件后用
+`--data-binary "@file"` 或 `[Text.Encoding]::UTF8.GetBytes($json)`，避免编码与转义导致
+400 请求体格式错误：`powershell.exe`（5.1）按 ANSI 读取无 BOM 的 UTF-8 脚本，脚本里的中文
+请求体会在发送前就被破坏。
 
 ## 工程结构
 
@@ -119,12 +136,12 @@ src/main/java/com/example/pwt
 ├── common        统一响应、错误码、异常处理、UUIDv7 与凭证工具
 ├── identity      用户、Agent Client、Token、scope、主体上下文
 ├── profile       个人画像、简历版本与公开链接
-├── work          项目
+├── work          项目、工作记录（录入 / 分页 / 详情 / 标签 / 全文检索 / 归档）
 ├── publicweb     匿名公开入口
 └── audit         操作审计
 ```
 
-M3+ 的 `work`（工作记录）、`memory`、`skill`、`context`、`report`、`mcp` 按设计文档 7 继续补充。
+M4+ 的 `memory`、`skill`、`context`、`report`、`mcp` 按设计文档 7 继续补充。
 
 ## M1 已落实的设计约束
 
@@ -148,6 +165,26 @@ M3+ 的 `work`（工作记录）、`memory`、`skill`、`context`、`report`、`
   `user_id` 条件，因此查询必须同时显式限定 `user_id` 与 `visibility = 'public'`。
 - 分页统一走 `PageQuery`：page 从 1 起、size 上限 100，越界直接 400 而不是静默截断。
 
+## M3 已落实的设计约束
+
+- 工作记录幂等：`Idempotency-Key` 落在 STORED 生成列 `idempotency_scope`（`user_id#key`）的唯一索引上，
+  先查后插 + 捕获 `DuplicateKeyException` 回读，并发重复提交返回既有记录而不是报错（设计文档 17.3）。
+- 标签写入与查询统一小写归一（`WorkLogService#normalizeTags`）：多值索引按二进制比较、大小写敏感，
+  不归一会造成静默漏检（设计文档 8.4 第 9 条）。
+- 关键词检索用 `MATCH ... AGAINST(... IN NATURAL LANGUAGE MODE)`，不用布尔模式：布尔模式把用户输入里的
+  `( ) + - "` 当运算符，未闭合括号会静默返回 0 行（设计文档 8.4 第 15 条，实测见 DDL 回归用例）。
+  布尔模式只留给 Context Builder 组装受控检索串（M5）。
+- 单字词（如“锁”）在 `ngram_token_size = 2` 下无法命中全文索引，`LIKE` 兜底路径随 M5 的 Context Builder
+  一并实现。
+- `source_type` 由凭证判定而不是采信客户端：Owner 会话写 `manual`，Agent 会话写 `agent` 并记录
+  `agent_client_id`（设计文档第 2 章「保留来源元数据」）。
+- 枚举取值在送入数据库前校验，非法值返回 `VALIDATION_ERROR` 并带中文字段名，
+  不让 `IllegalArgumentException` 的英文枚举名外泄。
+- 新建与更新的 `updated_at` 由应用层显式赋值：MyBatis-Plus 会把读到的旧值写回该列，
+  依赖 `ON UPDATE CURRENT_TIMESTAMP(3)` 会让它停在建行时刻（设计文档 8.4 第 5 条）。
+- 响应字段 `memoryExtraction` 当前固定 `notQueued`：提取任务表与 Worker 属 M4，
+  不提前假称 `queued`（设计文档 10.3 的示例值在 M4 后兑现）。
+
 ## 已验证
 
 - 应用可正常启动；未配置 `PWT_OWNER_JWT_SECRET` 时启动失败并给出明确原因（fail-fast）。
@@ -164,7 +201,20 @@ M3+ 的 `work`（工作记录）、`memory`、`skill`、`context`、`report`、`
   `GET /api/v1/agent-clients` 只返回当前用户的 1 条。
 - 审计落库：`pt_audit_log` 记录 `user.register`、`user.login`、`agent_client.create`、
   `agent_client.revoke`。
-- `MysqlDdlMigrationTest` 的 13 个用例在真实 MySQL 上全部通过（临时库 `pwt_ddl_test`，用完即删）。
+- `MysqlDdlMigrationTest` 的 14 个用例在真实 MySQL 上全部通过（临时库 `pwt_ddl_test`，用完即删），
+  其中含 M3 新增的全文检索模式回归：同一数据集下 `(上传` 在布尔模式命中 0 行、自然语言模式命中 1 行。
+- M3 端到端 17 项在 `personal_test` 实测通过，要点：
+  匿名读 401；Owner 建记录（`visibility=private`、`source=manual`、标签 `["ASR","  Upload ","asr"]`
+  入库为 `["asr","upload"]`）；同 `Idempotency-Key` 重复 POST 返回同一 id 且标题仍为原记录；
+  Agent 写入 `source=agent`；Agent 提交 `public` 返回 400；Owner 列表 2 条而 Agent 列表 0 条
+  （`private` 对 Agent 不可见）；Agent 读 Owner 的 private 详情 404；标签检索 `ASR`/`Upload`
+  大写查询各命中 1 条、不存在标签 0 条；关键词「上传」命中 2 条且 `(上传` 同样命中 2 条；
+  Agent 关键词检索 0 条；项目过滤与时间范围过滤生效；非法 workType/UUID/page/visibility 均 400
+  且提示为中文；可见性升为 `agent` 后 Agent 可读（200）；归档后状态为 `archived`。
+  中文正文经 `HEX()` 与 `CHAR_LENGTH()` 核对为正确 UTF-8 存储，未出现转码损失。
+- Agent scope 越权经真实写接口验证：仅授予 `memory:read` 的 Key 调 `POST /api/v1/work-logs`
+  返回 403 `SCOPE_REQUIRED`（`Missing required scope: work:write`）。
+- 工作记录审计落库：`work_log.create`、`work_log.visibility`、`work_log.archive` 均写入 `pt_audit_log`。
 
 ## 已知限制
 
@@ -175,7 +225,11 @@ M3+ 的 `work`（工作记录）、`memory`、`skill`、`context`、`report`、`
   中文单字检索与任务并发领取的实际影响需在 M5 前确认。
 - 数据库不可达时 `/actuator/health` 返回 503（DB 指示器 DOWN，耗时约 11s），
   而 `/actuator/health/liveness` 与 `/readiness` 保持 200，符合设计文档 18.3。
-- `pt_audit_log.before_data / after_data` 在 M1 暂不填充，随 M2 的字段差异摘要一并实现。
-- Agent 的 scope 越权（403 `SCOPE_REQUIRED`）已有单元级覆盖（`ActorContextTest`），
-  但缺少经由真实写接口的端到端用例，随 M3 一并补齐。
-- `GET /api/v1/agent-clients` 目前返回全量列表（不分页），分页参数随 M2 的列表规范统一实现。
+- `pt_audit_log.before_data / after_data` 尚未填充，写接口目前只记录动作与资源标识，
+  字段级差异摘要待后续里程碑补齐。
+- Agent scope 越权已有真实写接口的端到端验证（403 `SCOPE_REQUIRED`），另有单元级覆盖
+  （`ActorContextTest`、`WorkLogServiceTest`）。
+- `GET /api/v1/agent-clients` 目前返回全量列表（不分页）。
+- 设计文档 10.2 的 `GET /api/v1/audit-logs` 尚未实现（当前只有写入侧），调用返回 404「接口不存在」，
+  随 M9 的安全加固一并补齐。
+- 工作记录尚无修改正文与逻辑删除接口，M3 只覆盖录入、读取、检索、可见性与归档。

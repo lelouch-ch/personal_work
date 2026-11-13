@@ -71,7 +71,25 @@ class PwtApplicationContextTest {
             .anySatisfy(info -> assertThat(info.getPatternValues()).containsExactly("/api/v1/auth/whoami"))
             .anySatisfy(info -> assertThat(info.getPatternValues()).containsExactly("/api/v1/agent-clients"))
             .anySatisfy(info ->
-                assertThat(info.getPatternValues()).containsExactly("/api/v1/agent-clients/{clientId}/revoke"));
+                assertThat(info.getPatternValues()).containsExactly("/api/v1/agent-clients/{clientId}/revoke"))
+            .anySatisfy(info -> {
+                assertThat(info.getPatternValues()).containsExactly("/api/v1/work-logs");
+                assertThat(info.getMethodsCondition().getMethods()).containsExactly(
+                    org.springframework.web.bind.annotation.RequestMethod.POST);
+            })
+            .anySatisfy(info -> {
+                assertThat(info.getPatternValues()).containsExactly("/api/v1/work-logs");
+                assertThat(info.getMethodsCondition().getMethods()).containsExactly(
+                    org.springframework.web.bind.annotation.RequestMethod.GET);
+            })
+            .anySatisfy(info ->
+                assertThat(info.getPatternValues()).containsExactly("/api/v1/work-logs/{logId}"))
+            .anySatisfy(info ->
+                assertThat(info.getPatternValues()).containsExactly("/api/v1/work-logs/search/by-tag"))
+            .anySatisfy(info ->
+                assertThat(info.getPatternValues()).containsExactly("/api/v1/work-logs/search/by-keyword"))
+            .anySatisfy(info ->
+                assertThat(info.getPatternValues()).containsExactly("/api/v1/work-logs/{logId}/archive"));
     }
 
     @Test

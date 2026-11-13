@@ -832,6 +832,9 @@ CREATE TABLE pt_audit_log (
 13. `pt_audit_log` 与 `pt_context_access_log` **不设 `user_id` 外键**（其余业务表保留外键）。原因：审计写入使用独立事务（`REQUIRES_NEW`），当业务事务刚插入尚未提交的用户/客户端行时，外键需要对父行加共享锁，会与未提交事务自等并触发 `1205 Lock wait timeout exceeded`。实测嵌套事务写带外键子表阻塞 5s 超时，去掉外键后 180ms 通过。
     代价：审计表允许指向已删除用户的记录，用户物理删除时需一并归档或清理审计行；引用完整性由业务层与保留策略保证。
 14. 目标实例版本高于 Flyway 官方支持范围时（实测 MySQL 9.3.0 配 Flyway 9.22.3），迁移可正常执行，但 Flyway 会输出 `support has not been tested` 警告。发布前应锁定一个已验证版本组合，并把该警告纳入基线，避免每次启动都被误判为异常。
+15. **`MATCH ... AGAINST` 的检索模式取决于输入来源，不可一律用布尔模式。** 布尔模式把输入中的 `( ) + - " * ~` 当作运算符，实测（MySQL 9.3.0，ngram_token_size=2）对含“上传文件失败排查”的表执行 `AGAINST('(上传' IN BOOLEAN MODE)` 返回 **0 行且不报错**，同语句改用 `IN NATURAL LANGUAGE MODE` 命中 1 行；`+上传 -文件` 这类用户误输入同样会静默清空结果。
+    约定：**原始用户输入（工作记录关键词检索、`capture_work_log` 落库后的查询）一律使用自然语言模式**，因为输入不可控且无法保证运算符闭合；**布尔模式只用于 Context Builder 自行组装的检索串**（11.3 第 3 步），组装前必须剔除或转义运算符字符。两种模式的相关度分数不可跨模式比较，混用会破坏 11.4 的归一化。
+    该回归由 `MysqlDdlMigrationTest#shouldLoseRecallWhenRawInputGoesThroughBooleanMode` 锁定。
 
 ## 8.5 MySQL 服务器配置要求
 
@@ -1213,7 +1216,7 @@ Context Builder 是 PWT 的核心能力。它不是简单地把所有记忆拼�
 
 1. 身份和 scope 校验。
 2. 解析任务关键词、技术名词、项目名和任务意图。
-3. 根据用户、项目、记忆类型、状态、可见性和有效期检索候选；关键词召回使用 InnoDB 全文检索 `MATCH ... AGAINST(... IN BOOLEAN MODE)`，并按 8.5 的分词限制保留 `LIKE` 兜底路径。
+3. 根据用户、项目、记忆类型、状态、可见性和有效期检索候选；关键词召回使用 InnoDB 全文检索 `MATCH ... AGAINST(... IN BOOLEAN MODE)`，并按 8.5 的分词限制保留 `LIKE` 兜底路径。此处的布尔模式仅适用于 Context Builder 自行组装的检索串，组装前必须剔除运算符字符；直接转发用户原文的接口（如工作记录关键词检索）改用自然语言模式，原因见 8.4 第 15 条。
 4. 过滤低可信、过期、已归档、被替代和未审核记忆。
 5. 计算相关性分数。
 6. 去除重复或语义高度相似的候选。
