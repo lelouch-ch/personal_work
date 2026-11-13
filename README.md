@@ -1,0 +1,165 @@
+# Personal Work Twin (PWT)
+
+个人工作记忆与进化系统。设计基线见 `Personal_Work_Twin_完整技术设计文档_v1.1_mysql.md`（MySQL 版），
+v1.0 为 PostgreSQL 历史版本。
+
+当前进度：**M1 工程骨架与身份体系已完成**（Spring Boot 3.2.2 + MyBatis-Plus + MySQL + Flyway），
+已在 `192.168.124.108`（MySQL 9.3.0）上完成建库、迁移与端到端鉴权验证。
+
+测试：`mvn clean test` 46 个用例全绿；DDL 冒烟测试需指定数据库后端，见「构建与测试」。
+
+## 环境要求
+
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| JDK | 17+ | 已验证 `C:\Users\UNIS\.jdks\ms-17.0.21.0.2` |
+| Maven | 3.9.x | 使用 `conf/settings-ali.xml`，本地仓库 `D:\java\maven\mavenHome` |
+| MySQL | 8.0.32+ | 需 `utf8mb4` 与 `ngram` 解析器，参数要求见设计文档 8.5；已在 9.3.0 实测通过 |
+
+## 环境变量
+
+| 变量 | 默认值 | 必需 | 说明 |
+|---|---|---|---|
+| `PWT_DB_HOST` | `192.168.124.108` | 否 | 数据库主机 |
+| `PWT_DB_PORT` | `3306` | 否 | 数据库端口 |
+| `PWT_DB_NAME` | `personal_test` | 否 | 库名，需提前创建 |
+| `PWT_DB_USER` | `root` | 否 | 数据库账号 |
+| `PWT_DB_PASSWORD` | `zghz@123` | 否 | 数据库口令 |
+| `PWT_OWNER_JWT_SECRET` | 空 | **是** | Owner JWT HS256 密钥，≥32 字符，缺失则启动失败 |
+| `PWT_BOOTSTRAP_PASSWORD` | 空 | 首次启动需要 | 空库时创建的 Owner 初始口令 |
+| `PWT_AGENT_TOKEN_PEPPER` | 空 | 否 | Agent 密钥摘要的服务端 pepper |
+
+密钥禁止写入 Git（设计文档 18.2）。生产环境应把 `PWT_DB_PASSWORD` 等改为环境变量注入而不依赖默认值。
+
+> 当前仓库的 `application.yml` 保留了本机开发用的库账号默认值，便于本地直接启动；
+> 上生产前需清空这些默认值，改为纯环境变量注入。
+
+## 构建与测试
+
+```powershell
+$env:JAVA_HOME = 'C:\Users\UNIS\.jdks\ms-17.0.21.0.2'
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+$MVN = 'D:\java\apache-maven-3.9.5-bin\apache-maven-3.9.5\conf\settings-ali.xml'
+
+mvn -s $MVN clean test          # 单元与契约测试；DDL 冒烟测试此时跳过
+mvn -s $MVN -DskipTests package
+```
+
+### DDL 冒烟测试（需真实 MySQL）
+
+`MysqlDdlMigrationTest` 会验证 ngram 中文检索、STORED 生成列唯一约束、多值索引、CHECK 约束、
+外键与 `FOR UPDATE SKIP LOCKED`。它在独立临时库 `pwt_ddl_test` 中运行，结束后自动删除，
+不会触碰业务库。两种后端任选其一：
+
+```powershell
+# 方式一：外部实例（本机无 Docker 时使用）
+mvn -s $MVN test '-Dtest=MysqlDdlMigrationTest' `
+  '-Dpwt.test.db.url=jdbc:mysql://192.168.124.108:3306/' `
+  '-Dpwt.test.db.username=root' '-Dpwt.test.db.password=zghz@123' `
+  -DfailIfNoSpecifiedTests=false
+
+# 方式二：Testcontainers（需要 Docker，镜像 mysql:8.0.36，自动带 ngram 启动参数）
+mvn -s $MVN test '-Dtest=MysqlDdlMigrationTest' -DfailIfNoSpecifiedTests=false
+```
+
+两者都不可用时该测试类按假设跳过，不会让构建失败。
+
+> 外部实例模式下 `ngram_token_size` 属于服务器只读参数，无法由测试设置；
+> 若实例值不是 2，相关用例会跳过而非失败，需按设计文档 8.5 修正部署基线。
+
+## 启动
+
+```powershell
+$env:PWT_OWNER_JWT_SECRET   = '<至少 32 字符的随机串>'
+$env:PWT_BOOTSTRAP_PASSWORD = '<初始 Owner 口令>'
+java -jar target\pwt-server-0.1.0-SNAPSHOT.jar
+```
+
+启动时 Flyway 自动执行 `src/main/resources/db/migration` 下的 8 个迁移；用户表为空且配置了
+`PWT_BOOTSTRAP_PASSWORD` 时创建初始 Owner（默认登录名 `owner`）。
+
+注意 jar 会锁文件：重新 `mvn clean package` 前需先停掉正在运行的实例，否则 clean 报
+`Failed to delete ...jar`。
+
+## 接口速览
+
+```powershell
+# 1. Owner 登录，拿 JWT
+$jwt = (Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/auth/login `
+  -ContentType 'application/json' -Body '{"username":"owner","password":"***"}').data.accessToken
+
+# 2. 校验身份
+Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/whoami `
+  -Headers @{ Authorization = "Bearer $jwt" }
+
+# 3. 为 Agent 签发 API Key（仅此一次返回明文）
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/agent-clients `
+  -Headers @{ Authorization = "Bearer $jwt" } -ContentType 'application/json' `
+  -Body '{"clientName":"codex","scopes":["work:write","memory:read"]}'
+
+# 4. 用 Agent Key 访问，越权 scope 返回 SCOPE_REQUIRED
+$agent = '<上一步返回的 accessToken>'
+Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/whoami `
+  -Headers @{ Authorization = "Bearer $agent" }
+
+# 5. 撤销后立即失效
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/agent-clients/<clientId>/revoke `
+  -Headers @{ Authorization = "Bearer $jwt" }
+```
+
+步骤 1–5 已全部实测通过（见「已验证」）。PowerShell 传 JSON 请求体时建议写入文件后用
+`--data "@file"` 或 `Get-Content -Raw`，避免反引号转义导致 400 请求体格式错误。
+
+## 工程结构
+
+```text
+src/main/java/com/example/pwt
+├── app           启动类、装配、引导、Web 拦截器
+├── common        统一响应、错误码、异常处理、UUIDv7 与凭证工具
+├── identity      用户、Agent Client、Token、scope、主体上下文
+└── audit         操作审计
+```
+
+M2+ 的 `profile` / `work` / `memory` / `skill` / `context` / `report` / `mcp` 包按设计文档 7 继续补充。
+
+## M1 已落实的设计约束
+
+- user_id 由凭证解析，不接受客户端传入（设计文档 14.3）。
+- MySQL 无 RLS，用 MyBatis-Plus `TenantLineInnerInterceptor` 以 `user_id` 为租户列自动追加条件，
+  免拦截白名单为 `pt_user`、`pt_audit_log`、`pt_context_access_log`。
+- Owner 走 JWT，Agent 走随机 API Key + SHA-256 摘要查库，两套权限判定不混用（设计文档 14.2）。
+- Agent 密钥只存摘要，明文仅创建响应返回一次；撤销即时生效。
+- 主键由应用生成 UUIDv7；时间统一 `datetime(3)` + UTC，连接串强制会话时区（设计文档 8.1、ADR-019）。
+- 跨用户资源访问统一返回 `RESOURCE_NOT_FOUND`，不泄露资源存在性。
+
+## 已验证
+
+- 应用可正常启动；未配置 `PWT_OWNER_JWT_SECRET` 时启动失败并给出明确原因（fail-fast）。
+- 统一响应结构生效：`{"code","message","requestId","details"}`，`X-Request-Id` 响应头回显，
+  客户端传入的 `X-Request-Id` 会被复用。
+- 错误码映射生效：缺凭证与非法令牌 401 `UNAUTHENTICATED`；字段校验 400 `VALIDATION_ERROR`
+  并带字段级 `details`；请求体 JSON 不可解析 400（不是 500）。
+- Owner JWT 与 Agent API Key 按前缀分流到两条独立鉴权路径，互不混用。
+- Flyway 8 个迁移在 MySQL 9.3.0 上执行成功，`personal_test` 生成 17 张业务表 + 历史表。
+- 空库引导创建 Owner，登录后返回 JWT（`expiresAt` 为 12 小时后）。
+- 端到端链路：登录 → 签发 Agent Key（201，明文仅返回一次）→ 用 Agent Key 访问 `whoami`
+  返回 `actorType=AGENT` 及其 scopes → 撤销 → 再用同一 Key 访问返回 401。全流程 833ms。
+- `user_id` 隔离在真实库生效：库内 `pt_agent_client` 有 2 个用户的记录时，
+  `GET /api/v1/agent-clients` 只返回当前用户的 1 条。
+- 审计落库：`pt_audit_log` 记录 `user.register`、`user.login`、`agent_client.create`、
+  `agent_client.revoke`。
+- `MysqlDdlMigrationTest` 的 13 个用例在真实 MySQL 上全部通过（临时库 `pwt_ddl_test`，用完即删）。
+
+## 已知限制
+
+- 目标实例 MySQL 9.3.0 高于 Flyway 9.22.3 官方支持上限（8.0），启动会输出
+  `support has not been tested` 警告；迁移本身已验证可用，发布前需锁定版本组合。
+- 实例 `innodb_ft_enable_stopword=ON`、`transaction_isolation=REPEATABLE-READ`，
+  与设计文档 8.5 建议基线不一致（`ngram_token_size=2`、`binlog_format=ROW`、`utf8mb4` 已符合）。
+  中文单字检索与任务并发领取的实际影响需在 M5 前确认。
+- 数据库不可达时 `/actuator/health` 返回 503（DB 指示器 DOWN，耗时约 11s），
+  而 `/actuator/health/liveness` 与 `/readiness` 保持 200，符合设计文档 18.3。
+- `pt_audit_log.before_data / after_data` 在 M1 暂不填充，随 M2 的字段差异摘要一并实现。
+- Agent 的 scope 越权（403 `SCOPE_REQUIRED`）已有单元级覆盖（`ActorContextTest`），
+  但缺少经由真实写接口的端到端用例，随 M3 一并补齐。
+- `GET /api/v1/agent-clients` 目前返回全量列表（不分页），分页参数随 M2 的列表规范统一实现。

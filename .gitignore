@@ -1,0 +1,15 @@
+target/
+*.class
+*.log
+logs/
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+.DS_Store
+# 本地环境变量与口令，禁止入库（设计文档 18.2）
+.env
+.env.local
+*.local.yml

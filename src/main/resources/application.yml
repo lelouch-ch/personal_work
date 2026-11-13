@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: pwt-server
+  datasource:
+    url: jdbc:mysql://${PWT_DB_HOST:192.168.124.108}:${PWT_DB_PORT:3306}/${PWT_DB_NAME:personal_test}?useSSL=false&allowPublicKeyRetrieval=true&requireSSL=false&characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&preserveInstants=true&rewriteBatchedStatements=true
+    username: ${PWT_DB_USER:root}
+    password: ${PWT_DB_PASSWORD:zghz@123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: pwt-pool
+      maximum-pool-size: ${PWT_DB_POOL_SIZE:10}
+      minimum-idle: 2
+      # 任务领取使用 FOR UPDATE SKIP LOCKED，事务应保持简短，这里只做连接保护
+      connection-timeout: 10000
+      max-lifetime: 1740000
+  flyway:
+    enabled: true
+    baseline-on-migrate: false
+    locations: classpath:db/migration
+    encoding: UTF-8
+
+server:
+  port: ${PWT_SERVER_PORT:8080}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: input
+    # 软删除（deleted_at）当前由 Repository 显式追加 IS NULL 条件，
+    # 不启用 MP 全局逻辑删除：其 null 语义会渲染成 `deleted_at = null`，在 MySQL 下永不匹配。
+    # M2 若改为全局逻辑删除，必须先验证生成的 SQL 为 IS NULL。
+
+pwt:
+  identity:
+    # HS256 签名密钥：必须通过环境变量注入，长度不少于 32 字符（设计文档 18.2）
+    owner-jwt-secret: ${PWT_OWNER_JWT_SECRET:qYj0y8Spyj4dYCLjjrt4mO6Z5OmB2Qgh}
+    owner-token-ttl: ${PWT_OWNER_TOKEN_TTL:12h}
+    owner-token-issuer: pwt
+    # Agent 密钥摘要的 pepper，可为空；生产环境建议配置
+    agent-token-pepper: ${PWT_AGENT_TOKEN_PEPPER:}
+    agent-clock-skew: 30s
+  bootstrap:
+    # 首次启动时创建 Owner；库中已有用户则跳过
+    enabled: ${PWT_BOOTSTRAP_ENABLED:true}
+    username: ${PWT_BOOTSTRAP_USERNAME:owner}
+    password: ${PWT_BOOTSTRAP_PASSWORD:}
+    display-name: ${PWT_BOOTSTRAP_DISPLAY_NAME:Owner}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+logging:
+  # 日志含中文：固定 UTF-8，避免在 GBK 控制台出现乱码；
+  # 旧版 conhost 需先执行 chcp 65001，Windows Terminal + PowerShell 7 默认已就绪
+  charset:
+    console: UTF-8
+    file: UTF-8
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{requestId:-}] %logger{36} : %msg%n"
+  level:
+    com.example.pwt: INFO
+    org.springframework.jdbc.datasource.DataSourceTransactionManager: WARN

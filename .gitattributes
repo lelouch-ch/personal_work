@@ -1,0 +1,9 @@
+# 仓库内统一以 LF 存储，检出也使用 LF，避免 autocrlf 在 Windows/Linux 之间产生行尾差异
+* text=auto eol=lf
+
+# 二进制与不受行尾归一影响的文件
+*.png binary
+*.jpg binary
+*.jar binary
+*.zip binary
+*.mvnw text eol=lf
