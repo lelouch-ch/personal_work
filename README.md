@@ -3,10 +3,11 @@
 个人工作记忆与进化系统。设计基线见 `Personal_Work_Twin_完整技术设计文档_v1.1_mysql.md`（MySQL 版），
 v1.0 为 PostgreSQL 历史版本。
 
-当前进度：**M1 工程骨架与身份体系已完成**（Spring Boot 3.2.2 + MyBatis-Plus + MySQL + Flyway），
-已在 `192.168.124.108`（MySQL 9.3.0）上完成建库、迁移与端到端鉴权验证。
+当前进度：**M1 身份体系 + M2 Profile/Resume/Project 已完成**
+（Spring Boot 3.2.2 + MyBatis-Plus + MySQL + Flyway），已在 `192.168.124.108`（MySQL 9.3.0）
+完成建库、迁移与端到端验证。
 
-测试：`mvn clean test` 46 个用例全绿；DDL 冒烟测试需指定数据库后端，见「构建与测试」。
+测试：`mvn clean test` 71 个用例全绿（含指定数据库后端时的 13 个 DDL 用例，见「构建与测试」）。
 
 ## 环境要求
 
@@ -117,10 +118,13 @@ src/main/java/com/example/pwt
 ├── app           启动类、装配、引导、Web 拦截器
 ├── common        统一响应、错误码、异常处理、UUIDv7 与凭证工具
 ├── identity      用户、Agent Client、Token、scope、主体上下文
+├── profile       个人画像、简历版本与公开链接
+├── work          项目
+├── publicweb     匿名公开入口
 └── audit         操作审计
 ```
 
-M2+ 的 `profile` / `work` / `memory` / `skill` / `context` / `report` / `mcp` 包按设计文档 7 继续补充。
+M3+ 的 `work`（工作记录）、`memory`、`skill`、`context`、`report`、`mcp` 按设计文档 7 继续补充。
 
 ## M1 已落实的设计约束
 
@@ -131,6 +135,18 @@ M2+ 的 `profile` / `work` / `memory` / `skill` / `context` / `report` / `mcp` �
 - Agent 密钥只存摘要，明文仅创建响应返回一次；撤销即时生效。
 - 主键由应用生成 UUIDv7；时间统一 `datetime(3)` + UTC，连接串强制会话时区（设计文档 8.1、ADR-019）。
 - 跨用户资源访问统一返回 `RESOURCE_NOT_FOUND`，不泄露资源存在性。
+
+## M2 已落实的设计约束
+
+- 简历版本留存：`user_id + version` 唯一；“每用户仅一份当前简历”由 STORED 生成列唯一索引保证，
+  切换当前版本在同一事务内先清旧标记再置新标记。首份简历自动成为当前版本。
+- 可见性判定集中在 `identity/domain/AccessPolicy.java`，固化为严格递增三档（ADR-023）：
+  `private` 仅 Owner；`agent` 为 Owner + 具备 scope 的 Agent；`public` 含匿名。
+  `private` 对 Agent 也不可见，否则 `agent` 档没有存在必要。
+- 仅 Owner 可把内容设为 `public`，Agent 直接发布公开内容返回 400（设计文档 9.6）。
+- 匿名入口 `/public/{userId}/{profile|resume|exists}` 不带认证上下文，多租户拦截器此时不加
+  `user_id` 条件，因此查询必须同时显式限定 `user_id` 与 `visibility = 'public'`。
+- 分页统一走 `PageQuery`：page 从 1 起、size 上限 100，越界直接 400 而不是静默截断。
 
 ## 已验证
 

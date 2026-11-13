@@ -239,11 +239,30 @@ Web UI              Spring Boot App
 
 建议统一使用：
 
-- `private`：仅 Owner 和被明确授权的 Agent 可见。
+- `private`：仅 Owner 可见，Agent 与匿名均不可见。
 - `agent`：可供具有相应 scope 的 Agent 使用，但不公开展示。
 - `public`：允许匿名访问，例如公开简历和个人主页。
 
 默认值必须是 `private`。不能因为某条信息出现在公开简历里，就推断同一项目的工作日志也可公开。
+
+### 5.3.1 可见性与 scope 的判定矩阵
+
+原文只给出三档语义，未定义三档与 scope 叠加后的完整结果，实现时各处容易判断不一致。
+基线固化为严格递增的三档阶梯（ADR-023）：
+
+| visibility | Owner | Agent（须同时具备该资源 scope） | 匿名 |
+|---|---|---|---|
+| `private` | 可读 | 不可读 | 不可读 |
+| `agent` | 可读 | 可读 | 不可读 |
+| `public` | 可读 | 可读 | 可读 |
+
+- `private` 对 Agent 也不可见。若 `private` 已允许被授权 Agent 读取，`agent` 档就没有存在必要；
+  Agent 可见的数据必须由 Owner 显式提升到 `agent` 档。
+- scope 与 visibility 是两个独立维度，必须同时通过：scope 决定“该 Agent 能否碰这类资源”，
+  visibility 决定“该条数据允许给谁看”。
+- 无权读取一律返回 `RESOURCE_NOT_FOUND`，而不是 `FORBIDDEN`，避免泄露资源存在性（与 14.3 一致）。
+- 仅 Owner 可以把数据设为 `public`；Agent 提交 `public` 视为参数错误（见 9.6）。
+- 判定逻辑必须集中在单一策略组件内，禁止在各查询处重复实现，否则三档语义会随代码演进漂移。
 
 ## 5.4 状态定义
 
@@ -1785,6 +1804,7 @@ WHERE status = 'running'
 | ADR-020 | 以业务层隔离替代 RLS | MySQL 无行级安全，用多租户插件 + Repository 约束 + 跨用户测试兜底 |
 | ADR-021 | 生成列替代部分索引 | MySQL 不支持 `CREATE UNIQUE INDEX ... WHERE`，用 STORED 生成列实现同等唯一约束 |
 | ADR-022 | 审计与上下文访问日志不设 user_id 外键 | 审计走独立事务，外键会对未提交的父行加共享锁导致 1205 锁等待；引用完整性交由业务层与保留策略保证 |
+| ADR-023 | 可见性三档阶梯集中判定 | 5.3 与 9.6 叠加后的矩阵原先未定义；固化为 private 仅 Owner、agent 需 scope、public 可匿名，并由单一策略组件实现 |
 
 ---
 

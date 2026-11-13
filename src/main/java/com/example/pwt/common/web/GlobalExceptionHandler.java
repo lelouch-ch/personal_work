@@ -18,6 +18,7 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
@@ -99,6 +100,20 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleMissingParam(MissingServletRequestParameterException e,
                                                                HttpServletRequest request) {
         return build(ErrorCode.VALIDATION_ERROR, "缺少必填参数：" + e.getParameterName(), null);
+    }
+
+    /**
+     * 处理路径变量或请求参数类型不匹配（如非 UUID 的 {userId}）。属于客户端错误，不得回 5xx。
+     *
+     * @param e       类型不匹配异常
+     * @param request 当前请求
+     * @return 统一响应
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiResponse<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException e,
+                                                               HttpServletRequest request) {
+        log.warn("参数类型不匹配 uri={} name={} value={}", request.getRequestURI(), e.getName(), e.getValue());
+        return build(ErrorCode.VALIDATION_ERROR, "参数格式错误：" + e.getName(), null);
     }
 
     /**
