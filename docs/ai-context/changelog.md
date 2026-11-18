@@ -2,6 +2,32 @@
 
 里程碑级总结，最新在前。测试数与验证结论均来自实际运行，未跑过的不写。
 
+## 里程碑 6 - 2026-11-18 MCP Server（Agent 接入层）
+
+- 提交：待推送
+- Added: `mcp` 模块——Streamable HTTP 传输挂到 `/mcp`、认证过滤器、六个 Tools、
+  六个固定 Resources（含 9.2 的 `pwt://work/recent`）与按类型展开的模板资源；统一输出包装（设计文档 9.5）
+- Added: `identity/application/CredentialResolver`（从 REST 拦截器抽出，与 MCP 共用凭证判定）、
+  `context/application/GovernanceQueryService`（从 `ContextDataReader` 抽出，MCP 资源与
+  Context Builder 共用一套查询）
+- Added: 配置块 `pwt.mcp`（`enabled` 默认 false、endpoint、服务名/版本、公开链接前缀）
+- Added: 生产依赖 `io.modelcontextprotocol.sdk:mcp:0.11.3`（用户批准，理由见 ADR-026）
+- Changed: 业务失败与非预期失败统一置 `isError=true`，去掉 `Failure.protocolError`
+  这个恒为真的字段（原设计打算区分两类失败，实现后发现协议层并无第二档可用）
+- Fixed: MCP 侧自建 `ObjectMapper` 缺 JavaTime 模块，含 `Instant` 的 DTO 一律序列化失败
+- Fixed: 模板资源只登记清单未登记可读资源，`pwt://memory/approved/{memory_type}` 一律“资源不存在”
+- Fixed: 两处中文注释在写入时被二次编码成乱码，已重写并全仓库扫描确认无残留
+- Docs: 根 `README.md` 增补 M6 章节、接口速览第 11 步、环境变量与已知限制；
+  `requirements.md` 新增「Agent 接入（MCP）」；`decisions.md` 补 ADR-026 的 SDK 行为后果
+- Verified: 2026-11-18 `mvn clean test`（带真实 MySQL 参数）**322 例全绿**（此前 287 例），
+  新增 `McpArgsTest` / `McpInvocationTest` / `McpToolCatalogTest` / `McpResourceCatalogTest` /
+  `McpWiringTest` 共 34 例，另给 `PwtApplicationContextTest` 补了「MCP 默认关闭」断言
+- Verified: 真实协议往返（`personal_test` + 起真实实例）——401、握手、会话、SSE、
+  六个工具（含真实写入与审计落库）、12 个资源读取、参数与 scope 错误结构、
+  默认关闭时 `/mcp` 404 且 REST 不受影响
+- Not verified: SSE 长连接与并发未压测；MCP 端点无限流与 TLS；SDK 抛 `McpError` 时
+  返回空响应体属上游行为，未修
+
 ## 里程碑 5 - 2026-11-18 Context Builder
 
 - 提交：`bfde327`

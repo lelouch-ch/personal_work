@@ -55,6 +55,19 @@
   `LLM_PROVIDER_ERROR` 并重试，而不是返回“提取到 0 条候选”。
 - **新增生产依赖前必须先征求用户同意并说明理由**；不加与既有能力重叠的框架
   （如 Spring Security 全家桶，本项目只取 `spring-security-crypto` 做哈希）。
+- **挂在独立 Servlet 上的端点必须用 Filter 做认证。** Spring MVC 的拦截器只作用于 MVC 的
+  `HandlerMapping`，对 MCP 这类自己注册的 Servlet 完全不生效，漏了就是接口全裸；
+  凭证判定还要与 REST 共用同一个组件，否则同一个密钥会在一边能用、另一边被拒。
+- **传输提供者是 `HttpServlet` 时必须显式注册到配置路径。** 只声明成普通 Bean，
+  Boot 会兜底把它挂到 `/`，等于整站路径都交给它处理。
+- **自己 `new ObjectMapper()` 就必须注册 `JavaTimeModule` 并关闭时间戳输出。**
+  本项目的 DTO 大量使用 `Instant`，裸 mapper 会直接抛 `InvalidDefinitionException`，
+  表现为“工具结果序列化失败”这种与真实原因无关的错误。
+- **凡在调用线程上依赖主体上下文的入口，都要显式绑定与恢复。** 多租户插件取不到主体时
+  不追加 `user_id` 条件，带空主体查询会静默读到全部用户的数据而不是报错。
+  MCP 走 SDK 的处理线程，与进入 Servlet 的线程不同，必须每调用绑定一次（`McpInvocation`）。
+- **MCP 的模板资源要展开成具体 URI 注册。** SDK 的 `resources/read` 只按已注册资源的 URI
+  匹配，`resources/templates/list` 的清单是纯展示，只登记清单会让客户端能列出却读不到。
 
 ## 测试
 

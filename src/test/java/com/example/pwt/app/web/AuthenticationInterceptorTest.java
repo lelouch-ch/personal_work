@@ -11,6 +11,7 @@ import com.example.pwt.common.api.Scope;
 import com.example.pwt.common.error.BizException;
 import com.example.pwt.common.error.ErrorCode;
 import com.example.pwt.identity.application.AgentClientService;
+import com.example.pwt.identity.application.CredentialResolver;
 import com.example.pwt.identity.application.OwnerTokenService;
 import com.example.pwt.identity.domain.ActorContext;
 import com.example.pwt.identity.domain.ActorContextHolder;
@@ -48,7 +49,10 @@ class AuthenticationInterceptorTest {
 
     @BeforeEach
     void setUp() {
-        interceptor = new AuthenticationInterceptor(ownerTokenService, agentClientService);
+        // 用真实解析器接到两个 mock 服务上：本类的断言关心的是“两类凭证走不同鉴权路径”，
+        // 而前缀路由现在是解析器的职责，换成 mock 解析器就什么都测不到
+        interceptor = new AuthenticationInterceptor(
+            new CredentialResolver(ownerTokenService, agentClientService));
     }
 
     @AfterEach

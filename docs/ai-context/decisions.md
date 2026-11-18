@@ -40,7 +40,8 @@ ADR 风格的关键决策与理由，最新在前。已被取代的决策标注�
   - `mcp-spring-webmvc`：额外的 Spring 集成层，本项目自己注册 Servlet 即可，不需要多一层依赖。
 - Consequences: 依赖树多出 `reactor-core` 与 `json-schema-validator`；SDK 声明的
   jackson 2.17 / reactor 3.7 被 Boot 3.2.2 的 BOM 降为 2.15.3 / 3.6.2，
-  这组降级尚未在运行时验证，M6 的测试必须覆盖真实协议往返。
+  这组降级已在 2026-11-18 的真实协议往返中验证通过（握手、会话、SSE 分帧、六个工具、
+  十二个资源，见 `README.md` 的 M6 端到端记录）；但只有单连接功能证据，没有并发与负载证据。
   升级 Boot 或 SDK 时要重跑全量测试确认降级仍兼容；
   若 SDK 后续版本改了 API，需要评估迁移成本而不是随手升级。
   关联：ADR-005（MCP + REST 双入口）、ADR-006（Streamable HTTP 为远程基线）。
@@ -60,3 +61,9 @@ ADR 风格的关键决策与理由，最新在前。已被取代的决策标注�
   不是可选优化。见设计文档 8.4 第 20 条。
 - ADR-009（Context Builder）：预算分配必须是“固定段先扣、可变段拿剩余”。反过来给记忆段
   预留固定比例，会在约束多时把约束挤出上下文，而约束被丢弃的代价远高于少一条补充经验。
+- ADR-026（MCP SDK）：SDK 的 `resources/read` 只按**已注册资源**的 URI 做模板匹配，
+  `resources/templates/list` 返回的清单纯展示、不参与匹配。因此模板必须展开成具体 URI
+  逐个注册（本项目按六种记忆类型展开），否则客户端能列出却读不到，报“资源不存在”。
+  另两处实测行为需知悉：裸 `ObjectMapper` 缺 JavaTime 模块会让所有含 `Instant` 的 DTO
+  序列化失败（MCP 侧自建 mapper 时必须显式注册）；handler 抛 `McpError` 时 servlet 传输
+  只记日志并返回空响应体，不是 JSON-RPC 错误帧。升级 SDK 后需复测这三点。

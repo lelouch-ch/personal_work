@@ -99,6 +99,16 @@ pwt:
         limit: 3
       - type: goal
         limit: 2
+    # MCP 接入层（设计文档 9.1、ADR-006、ADR-026）：Agent 专用入口。
+    # 默认关闭：MCP 走独立 Servlet，未做 TLS 与限流前不随 REST 一起对外暴露，
+    # 需要时设 PWT_MCP_ENABLED=true 开启。
+    mcp:
+      enabled: ${PWT_MCP_ENABLED:false}
+      endpoint: ${PWT_MCP_ENDPOINT:/mcp}
+      server-name: ${PWT_MCP_SERVER_NAME:personal-work-twin}
+      server-version: ${PWT_MCP_SERVER_VERSION:0.1.0}
+      # 简历公开链接前缀，空则 get_resume_url 返回站内相对路径；对外部署应配成 https://host
+      public-base-url: ${PWT_MCP_PUBLIC_BASE_URL:}
 
 management:
   endpoints:

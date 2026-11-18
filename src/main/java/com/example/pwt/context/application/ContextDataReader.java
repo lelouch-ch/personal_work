@@ -1,14 +1,10 @@
 package com.example.pwt.context.application;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
 import com.example.pwt.common.api.Scope;
-import com.example.pwt.common.api.Visibility;
 import com.example.pwt.context.domain.ContextQuery;
 import com.example.pwt.context.infrastructure.ConstraintEntity;
-import com.example.pwt.context.infrastructure.ConstraintMapper;
 import com.example.pwt.context.infrastructure.StyleRuleEntity;
-import com.example.pwt.context.infrastructure.StyleRuleMapper;
 import com.example.pwt.identity.domain.AccessPolicy;
 import com.example.pwt.identity.domain.ActorContext;
 import com.example.pwt.memory.application.MemoryRecall;
@@ -44,12 +40,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class ContextDataReader {
 
-    /** 约束注入条数上限：约束是硬规则，但条数失控会吃光预算，挤掉任务真正需要的记忆。 */
-    private static final int MAX_CONSTRAINTS = 12;
-
-    /** 风格规则注入条数上限。 */
-    private static final int MAX_STYLE_RULES = 10;
-
     /**
      * 单条记忆注入文本的长度上限。
      *
@@ -59,19 +49,11 @@ public class ContextDataReader {
      */
     private static final int MAX_INJECT_CHARS = 600;
 
-    /** 状态：生效。 */
-    private static final String STATUS_ACTIVE = "active";
-
-    /** 状态：已批准。 */
-    private static final String STATUS_APPROVED = "approved";
-
     private final UserProfileMapper userProfileMapper;
 
     private final ProjectMapper projectMapper;
 
-    private final ConstraintMapper constraintMapper;
-
-    private final StyleRuleMapper styleRuleMapper;
+    private final GovernanceQueryService governanceQueryService;
 
     private final MemoryRecallService memoryRecallService;
 
@@ -82,18 +64,16 @@ public class ContextDataReader {
      *
      * @param userProfileMapper   画像 Mapper
      * @param projectMapper       项目 Mapper
-     * @param constraintMapper    约束 Mapper
-     * @param styleRuleMapper     风格规则 Mapper
+     * @param governanceQueryService 约束与风格规则查询（与 MCP Resources 共用）
      * @param memoryRecallService 记忆召回服务
      * @param evidenceMapper      记忆证据 Mapper，用于补出来源引用
      */
     public ContextDataReader(UserProfileMapper userProfileMapper, ProjectMapper projectMapper,
-                             ConstraintMapper constraintMapper, StyleRuleMapper styleRuleMapper,
+                             GovernanceQueryService governanceQueryService,
                              MemoryRecallService memoryRecallService, MemoryEvidenceMapper evidenceMapper) {
         this.userProfileMapper = userProfileMapper;
         this.projectMapper = projectMapper;
-        this.constraintMapper = constraintMapper;
-        this.styleRuleMapper = styleRuleMapper;
+        this.governanceQueryService = governanceQueryService;
         this.memoryRecallService = memoryRecallService;
         this.evidenceMapper = evidenceMapper;
     }
@@ -183,35 +163,11 @@ public class ContextDataReader {
     }
 
     private List<ConstraintEntity> readConstraints(ActorContext actor) {
-        // FIELD() 显式给定严重程度顺序：字典序会把 critical 排在 high 之后，
-        // 也会让 normal 排在 low 之前，预算不足时先丢错的这一头
-        LambdaQueryWrapper<ConstraintEntity> wrapper = visible(new LambdaQueryWrapper<ConstraintEntity>()
-            .eq(ConstraintEntity::getUserId, actor.userId().toString())
-            .eq(ConstraintEntity::getStatus, STATUS_ACTIVE), actor, ConstraintEntity::getVisibility);
-        wrapper.last("ORDER BY FIELD(severity, 'critical', 'high', 'normal', 'low'), created_at DESC"
-            + " LIMIT " + MAX_CONSTRAINTS);
-        return constraintMapper.selectList(wrapper);
+        return governanceQueryService.activeConstraints(actor);
     }
 
     private List<StyleRuleEntity> readStyleRules(ActorContext actor) {
-        LambdaQueryWrapper<StyleRuleEntity> wrapper = visible(new LambdaQueryWrapper<StyleRuleEntity>()
-            .eq(StyleRuleEntity::getUserId, actor.userId().toString())
-            .eq(StyleRuleEntity::getStatus, STATUS_APPROVED), actor, StyleRuleEntity::getVisibility);
-        wrapper.last("ORDER BY confidence DESC, updated_at DESC LIMIT " + MAX_STYLE_RULES);
-        return styleRuleMapper.selectList(wrapper);
-    }
-
-    private <T> LambdaQueryWrapper<T> visible(LambdaQueryWrapper<T> wrapper, ActorContext actor,
-                                              SFunction<T, ?> visibilityColumn) {
-        if (actor.isOwner() || actor.isSystem()) {
-            return wrapper;
-        }
-        if (actor.agentClientId() != null) {
-            wrapper.in(visibilityColumn, List.of(Visibility.AGENT.getValue(), Visibility.PUBLIC.getValue()));
-        } else {
-            wrapper.eq(visibilityColumn, Visibility.PUBLIC.getValue());
-        }
-        return wrapper;
+        return governanceQueryService.approvedStyleRules(actor);
     }
 
     private Map<UUID, List<UUID>> sourceRefs(List<MemoryEntity> memories) {

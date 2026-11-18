@@ -72,6 +72,9 @@ class PwtApplicationContextTest {
     @Autowired
     private com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor mybatisPlusInterceptor;
 
+    @Autowired
+    private org.springframework.context.ApplicationContext context;
+
     @Test
     void shouldWireIdentityBeans() {
         assertThat(dataSource).isNotNull();
@@ -141,5 +144,13 @@ class PwtApplicationContextTest {
             .isInstanceOf(com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor.class);
         assertThat(mybatisPlusInterceptor.getInterceptors().get(1))
             .isInstanceOf(com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor.class);
+    }
+
+    @Test
+    void shouldKeepMcpDisabledByDefault() {
+        // MCP 是 Agent 专用入口，未配置开关时不应注册任何 Bean，否则会随 REST 一起对外暴露
+        assertThat(context.getBeanNamesForType(com.example.pwt.mcp.McpServerConfig.class)).isEmpty();
+        assertThat(context.getBeanNamesForType(
+            io.modelcontextprotocol.server.McpSyncServer.class)).isEmpty();
     }
 }

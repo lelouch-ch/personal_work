@@ -4,11 +4,11 @@
 v1.0 为 PostgreSQL 历史版本。
 
 当前进度：**M1 身份体系 + M2 Profile/Resume/Project + M3 Work Log + M4 Memory Engine +
-M5 Context Builder 已完成**
+M5 Context Builder + M6 MCP Server 已完成**，M7 Skill 与 M8 报告待做
 （Spring Boot 3.2.2 + MyBatis-Plus + MySQL + Flyway），已在 `192.168.124.108`（MySQL 9.3.0）
 完成建库、迁移与端到端验证。
 
-测试：`mvn clean test` 287 个用例全绿（含指定数据库后端时的 18 个 DDL 用例，见「构建与测试」）。
+测试：`mvn clean test` 322 个用例全绿（含指定数据库后端时的 18 个 DDL 用例，见「构建与测试」）。
 
 ## 环境要求
 
@@ -41,12 +41,18 @@ M5 Context Builder 已完成**
 | `PWT_MEMORY_PREFERENCE_MIN_EVIDENCE` | `2` | 否 | 偏好/经验自动批准所需的最低证据条数 |
 | `PWT_CONTEXT_TOKEN_BUDGET` | `4000` | 否 | `build_context` 未指定预算时的默认 Token 预算 |
 | `PWT_CONTEXT_MAX_CANDIDATES` | `60` | 否 | 单次召回的候选上限，约束去重与打分规模 |
+| `PWT_MCP_ENABLED` | `false` | 否 | 是否暴露 MCP 端点 `/mcp`（Agent 专用入口，默认关） |
+| `PWT_MCP_ENDPOINT` | `/mcp` | 否 | MCP 端点路径 |
+| `PWT_MCP_PUBLIC_BASE_URL` | 空 | 否 | 简历链接前缀；为空时 `get_resume_url` 返回站内相对路径 |
 
 密钥禁止写入 Git（设计文档 18.2）。生产环境应把 `PWT_DB_PASSWORD` 等改为环境变量注入而不依赖默认值。
 
 未配置 `PWT_LLM_ENDPOINT` / `PWT_LLM_API_KEY` 时，Provider 退化为“未配置”实现：
 REST、审核、幂等等链路照常可用，但 `EXTRACT_MEMORY` 任务会明确失败并重试，
 不会伪造“提取到 0 条候选”的正常结论（ADR-025）。
+
+MCP 默认关闭：它是 Agent 专用入口，在 TLS 与限流落地前不随 REST 一起对全网暴露。
+需要时设 `PWT_MCP_ENABLED=true`，详见「M6 已落实的设计约束」。
 
 > 当前仓库的 `application.yml` 保留了本机开发用的库账号默认值，便于本地直接启动；
 > 上生产前需清空这些默认值，改为纯环境变量注入。
@@ -157,9 +163,24 @@ Invoke-RestMethod -Uri 'http://localhost:8080/api/v1/context/memories/search?q=�
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/context/build `
   -Headers @{ Authorization = "Bearer $agent" } -ContentType 'application/json; charset=utf-8' `
   -Body '{"task":"给上传接口加文件参数校验","tokenBudget":2000,"includeTypes":["experience","fact"]}'
+
+# 11. MCP（Agent 专用入口，需 PWT_MCP_ENABLED=true 或 --pwt.mcp.enabled=true）
+# 同一张 Agent Key 直接用在 MCP 上：initialize → notifications/initialized → tools/call
+$init = @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{
+    protocolVersion = '2025-06-18'; capabilities = @{}
+    clientInfo = @{ name = 'my-agent'; version = '1.0' } } } | ConvertTo-Json -Depth 8 -Compress
+$r = Invoke-WebRequest -Method Post -Uri http://localhost:8080/mcp `
+  -Headers @{ Authorization = "Bearer $agent"; Accept = 'application/json, text/event-stream' } `
+  -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($init))
+$sid = $r.Headers['mcp-session-id']   # 后续请求必须带上这个会话头
+# 工具调用（响应是 SSE 帧，业务结果在 data: 行的 text content 里）
 ```
 
-步骤 1–10 已全部实测通过（见「已验证」）。PowerShell 传 JSON 请求体时建议写入文件后用
+MCP 的报文较啰嗦，实际接入建议直接用 MCP 客户端 SDK。手工验证时用
+`[Text.Encoding]::UTF8.GetBytes($json)` 传体，并按 SSE 逐行取 `data:`；
+`resources/read` 失败时 MCP SDK 0.11.3 会返回空响应体（见「已知限制」）。
+
+步骤 1–11 已全部实测通过（见「已验证」）。PowerShell 传 JSON 请求体时建议写入文件后用
 `--data-binary "@file"` 或 `[Text.Encoding]::UTF8.GetBytes($json)`，避免编码与转义导致
 400 请求体格式错误：`powershell.exe`（5.1）按 ANSI 读取无 BOM 的 UTF-8 脚本，脚本里的中文
 请求体会在发送前就被破坏。
@@ -178,7 +199,8 @@ src/main/java/com/example/pwt
 ├── task          异步任务表、领取事务、Worker 与租约回收
 ├── llm           LLM Provider 抽象、OpenAI 兼容实现、提示词模板
 ├── publicweb     匿名公开入口
-└── audit         操作审计
+├── audit         操作审计
+└── mcp           Agent 接入层：Streamable HTTP 传输、认证过滤器、Tools 与 Resources
 ```
 
 `task` 与 `llm` 不在设计文档 7 的模块表内：任务队列是跨领域基础设施，
@@ -189,7 +211,8 @@ src/main/java/com/example/pwt
 （`pt_constraint`）与风格规则表（`pt_style_rule`）的实体暂放本模块：MVP 只有 Context Builder
 读取它们，等 M7 有维护接口时再归入各自的模块。
 
-M6+ 的 `skill`、`report`、`mcp` 按设计文档 7 继续补充。
+`mcp` 是设计文档 7 的 mcp 模块，只做协议接入与权限透传，业务一律调用各领域服务，
+不在本模块写查询。M7+ 的 `skill`、`report` 继续补充。
 
 ## M1 已落实的设计约束
 
@@ -298,6 +321,40 @@ M6+ 的 `skill`、`report`、`mcp` 按设计文档 7 继续补充。
 - **边界标记随结果返回而不强行包裹正文**（15.2）：服务端强行包裹会破坏 JSON 结构稳定性，
   标记交由调用方拼接提示词时使用；`includeSkills=false` 时连标记一并省略。
 
+## M6 已落实的设计约束
+
+- **传输用 Streamable HTTP 而非 SSE-only**（9.1、ADR-006）：单个端点 `/mcp` 同时支持普通
+  POST 请求与 SSE 流式响应，客户端不必维持两条连接。传输提供者本身是 `HttpServlet`，
+  必须用 `ServletRegistrationBean` 显式挂到配置路径——只声明成普通 Bean 时 Boot 会把它
+  兜底注册到 `/`，等于整站路径都交给 MCP 处理。
+- **认证用 Filter 而不是 MVC 拦截器**：拦截器只挂在 MVC 的 `HandlerMapping` 上，对独立注册的
+  Servlet 完全不生效，漏了这层就是 MCP 全裸。凭证解析抽成 `identity/application/CredentialResolver`
+  与 REST 共用，避免“同一个密钥一边能用一边被拒”的规则漂移。
+- **主体跨线程用 SDK 的 `contextExtractor` 传递**，并在每次调用开始时绑定 `ActorContextHolder`：
+  MCP 的处理线程与进入 Servlet 的线程不同，而本项目的多租户拦截器在取不到主体时**不追加**
+  `user_id` 条件，一旦带着空主体查询就会静默读到全部用户的数据。因此取不到主体直接失败，不放行。
+- **输出是 9.5 的统一包装放在 text content 里，不给 `structuredContent`**：SDK 在工具声明了
+  `outputSchema` 时会按该 schema 校验 `structuredContent`，而包装里的 `meta` 每次都变，
+  严格对齐等于给每个工具再写一份包装 schema。9.5 本身写的是“建议”，同时满足 9.1
+  “提供简短 text content 以兼容客户端”。
+- **业务失败不是协议错误**：scope 不足、参数非法转成 `isError=true` + 错误码 + 中文原因，
+  让 Agent 有机会自我修正；只有非预期异常才走 JSON-RPC 层，且只回通用提示，堆栈留在服务端。
+- **MVP 只注册 6 个工具**：`get_profile`、`get_resume_url`、`capture_work_log`、`propose_memory`、
+  `search_memories`、`build_context`。Skill 与报告分别属于 M7、M8，提前注册会让 Agent 调到空实现。
+- **写工具不给 `public` 可见性**（9.6）：Schema 的 enum 里就只有 `private` / `agent`，
+  否则客户端要先猜、再被服务端拒一次。
+- **入参用 snake_case，输出复用 REST 的 DTO**：入参是 MCP 约定，输出与 REST 保持一致，
+  Agent 与前端读到的是同一份字段语义。所有解析错误都点名到具体字段。
+- **模板资源必须展开成具体 URI 注册**（9.2）：SDK 的 `resources/read` 只匹配**已注册资源**的
+  URI 模板，`resources/templates/list` 的清单只用于展示。因此 `pwt://memory/approved/{memory_type}`
+  按六种记忆类型逐个注册，非法类型自然落到“资源不存在”，而不是静默返回空列表。
+- **资源覆盖 9.2 表中除 `pwt://skills/list` 以外的全部 URI**：六个固定资源
+  （`profile/identity`、`profile/resume`、`profile/style`、`profile/constraints`、
+  `memory/approved`、`work/recent`）加一个按类型模板。`skills/list` 属 M7，
+  现在注册会指向空实现。可见性一律交给服务层判定，MCP 侧不另写一套。
+- **默认关闭**（`pwt.mcp.enabled=false`）：未做 TLS 与限流前不随 REST 一起对外暴露，
+  关闭时 `/mcp` 返回 404，REST 与契约测试均不受影响。
+
 ## 已验证
 
 - 应用可正常启动；未配置 `PWT_OWNER_JWT_SECRET` 时启动失败并给出明确原因（fail-fast）。
@@ -368,6 +425,27 @@ M6+ 的 `skill`、`report`、`mcp` 按设计文档 7 继续补充。
 - M5 顺带修复两处真实缺陷：记忆的项目归属在 `insert` 之后才赋值导致库里存 `NULL`；
   `LIKE ... ESCAPE` 的反斜杠转义少写一层，使单字兜底查询直接抛
   `Parameter index out of range`（后者已用 `MemoryMapperSqlTest` 的注解值断言锁死）。
+- **M6 端到端**（真实 MySQL `personal_test` + MCP Streamable HTTP 协议往返，非 mock）：
+  无凭证 `POST /mcp` → 401 且响应体是统一错误结构；`initialize` → 200 返回
+  `serverInfo` / capabilities / 中文 instructions 与 `mcp-session-id`；
+  `notifications/initialized` → 202；`tools/list` → 6 个工具（SSE 帧，中文描述与完整 inputSchema）；
+  `tools/call` 六个工具全部 200，其中 `capture_work_log` 真实写入 `pt_work_log`
+  （`source=agent`、`memoryExtraction=queued` 并随后排入 `pt_async_task`）、
+  `propose_memory` 真实写入 `pt_memory`（`status=candidate`，服务端把风险重判为 `L0`）、
+  `build_context` 写 `pt_context_access_log` 与 `pt_audit_log`（`context.build`）、
+  `pt_agent_client.last_seen_at` 随调用更新；
+  `resources/list` 返回 12 个资源（6 固定 + 6 类型展开）、`resources/templates/list` 返回 1 个模板，
+  `pwt://memory/approved/experience`、`pwt://profile/style`、`pwt://work/recent` 均实测读到信封 JSON
+  （`pwt://work/recent` 返回真实的最近记录，`tags` 为 `["m6","mcp"]`）；
+  缺必填参数 → `isError=true` + `VALIDATION_ERROR` + 中文点名 `title`；
+  未知工具 → JSON-RPC `-32603`；scope 不足的 Key 调写工具与 `build_context` 均返回
+  `SCOPE_REQUIRED` 并说明缺哪个 scope，仅 `memory:propose` 的 Key 读画像资源同样被拒；
+  `PWT_MCP_ENABLED=false`（默认）时 `POST /mcp` → 404，REST 接口不受影响。
+- M6 顺带修复两处真实缺陷：MCP 侧的 `ObjectMapper` 是裸构造的，缺 JavaTime 模块，
+  导致所有含 `Instant` 的 DTO 序列化失败（表现为“工具结果序列化失败”，已在 `McpJson` 显式注册
+  `JavaTimeModule` 并与 REST 一致输出 ISO-8601）；模板资源此前只登记清单未登记可读资源，
+  `pwt://memory/approved/{memory_type}` 一律报“资源不存在”，已按类型展开注册并由
+  `McpResourceCatalogTest` 锁死“清单与可读性必须同时成立”。
 
 ## 已知限制
 
@@ -403,3 +481,15 @@ M6+ 的 `skill`、`report`、`mcp` 按设计文档 7 继续补充。
 - 近似去重只用了 InnoDB 全文检索 + 规则；向量相似度按 6.5 与 ADR-013 的约定留待后续外挂。
 - 记忆尚无 `valid_from`/`valid_until` 的编辑入口与过期清理任务，`expires_at` 仅写入侧支持。
 - 自动批准阈值是全局配置，尚无按用户/类型的差异化策略。
+- **MCP SDK 0.11.3 的 servlet 传输在 handler 抛 `McpError` 时只记日志并返回空响应体**：
+  例如读取未注册的 `pwt://nope/x`，客户端拿到 HTTP 200 + 空 body，而不是 JSON-RPC 的
+  `-32002 resource not found`。已实测确认是上游行为（`responseStream(...).block()` 的
+  catch 分支只 `AsyncContext.complete()`），不修是为了不 fork SDK；
+  资源清单与模板已展开为可读 URI，正常客户端不会走到这条路径，服务端日志可见原因。
+  升级 SDK 后需复测此项。
+- MCP 尚无独立的接入审计表：工具调用复用领域侧的 `pt_audit_log` 与 `pt_context_access_log`，
+  因此“某张 Agent Key 通过 MCP 调了哪些工具”目前只能从服务端日志追溯。
+- MCP 端点除 Bearer 凭证外没有额外防护（无限流、无 TLS 终结、无 IP  allowlist），
+  这是它默认关闭的直接原因；M9 生产化时补齐。
+- SSE 长连接与并发只做过单连接协议验证，未压测；`mcp` 依赖被 Boot 3.2.2 的 BOM
+  降级为 jackson 2.15.3 / reactor 3.6.2，兼容性只有真实协议往返的证据，没有负载证据。

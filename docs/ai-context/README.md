@@ -18,10 +18,11 @@ Personal Work Twin（PWT）是个人工作记忆与进化系统：为一个人�
   - M3 工作记录：录入幂等、标签与全文检索、可见性调整与归档
   - M4 记忆引擎：异步提取闭环、去重与冲突检测、风险分级与审核、版本替代
   - M5 Context Builder：布尔检索与 LIKE 兜底、加权评分、去相似、Token 预算、访问审计
-- 下一里程碑：M6 MCP Server（Streamable HTTP + Resources + 核心 Tools）。
-  SDK 已选定并验证可从镜像拉取，见 [ADR-026](decisions.md)
-- 明确未做：MCP Server（M6）、Skill 与工作风格（M7）、报告能力（M8）、生产化与数据生命周期（M9）；
-  `GET /api/v1/audit-logs` 只有写入侧，调用返回 404
+  - M6 MCP Server：Streamable HTTP 端点、与 REST 共用凭证判定、六个 Tools、
+    Resources 与模板资源，默认关闭（见 [ADR-026](decisions.md)）
+- 下一里程碑：M7 Skill 与工作风格
+- 明确未做：Skill 与工作风格（M7）、报告能力（M8）、生产化与数据生命周期（M9）；
+  `GET /api/v1/audit-logs` 只有写入侧，调用返回 404；MCP 端点尚无限流与 TLS
 - 已知约束（会直接改变设计选择，细节见 [conventions](conventions.md)）：
   - MySQL 无行级安全，多用户隔离只能由应用层补偿（ADR-020）
   - MySQL 不支持部分索引，条件唯一约束用 STORED 生成列表达（ADR-021）
@@ -39,6 +40,8 @@ Personal Work Twin（PWT）是个人工作记忆与进化系统：为一个人�
 - `src/main/java/com/example/pwt/llm` - LLM Provider 抽象与 OpenAI 兼容实现
 - `src/main/java/com/example/pwt/audit` - 审计写入（独立事务，失败不拖垮主业务）
 - `src/main/java/com/example/pwt/publicweb` - 匿名公开入口
+- `src/main/java/com/example/pwt/mcp` - Agent 接入层：传输注册、认证过滤器、Tools 与 Resources，
+  只做协议与权限透传，不写业务查询
 - `src/main/resources/db/migration` - Flyway V1~V10
 - `src/test/java/com/example/pwt/migration` - 在真实 MySQL 上校验 DDL 行为的测试
 - `README.md` - 面向人的构建 / 启动 / 接口速览与逐项验证记录

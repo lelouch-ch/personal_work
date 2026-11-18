@@ -72,9 +72,36 @@
 - Constraints: Token 估算是字符分档的保守上界而非模型 tokenizer；`skills` 段恒为空数组，待 M7
 - Open questions: 权重与配额是否需要按用户/模型差异化；召回质量尚未用真实语料评测
 
+## Agent 接入（MCP）
+
+- Status: implemented
+- Requirement: Agent 用同一张 API Key 通过 MCP 协议读写个人数据，权限判定与 REST 完全一致。
+- Acceptance criteria:
+  - 未认证请求返回 401 且响应体是统一错误结构；撤销后的 Key 立即失效
+  - `initialize` 返回服务信息、capabilities 与中文 instructions，并下发会话标识；
+    后续请求必须携带该会话标识
+  - 六个工具可用：`get_profile`、`get_resume_url`、`capture_work_log`、`propose_memory`、
+    `search_memories`、`build_context`；写工具真实落库并触发既有的提取任务与审计链路
+  - 工具输出是统一包装（`ok` / `data` / `meta.request_id` / `error`）放在 text content 里，
+    字段语义与 REST 一致，时间为 ISO-8601
+  - 缺必填参数返回 `isError=true` + `VALIDATION_ERROR` 且点名具体字段；scope 不足返回
+    `SCOPE_REQUIRED` 并说明缺哪个 scope；两者都不是协议层异常
+  - 写工具的可见性入参不接受 `public`
+  - 设计文档 9.2 表中的资源除 `pwt://skills/list`（属 M7）外全部提供：
+    `profile/identity`、`profile/resume`、`profile/style`、`profile/constraints`、
+    `memory/approved`、`work/recent`
+  - `resources/list` 里的每个 URI 都必须能被 `resources/read` 读到；
+    模板 `pwt://memory/approved/{memory_type}` 的六种类型逐个可读
+  - 资源的可见性与 scope 判定与 REST 走同一套服务层规则，不因入口不同而放宽
+  - 默认关闭时 `/mcp` 返回 404，REST 与其余测试不受影响
+- Constraints: 主体必须由会话传到调用线程——多租户拦截器取不到主体时不追加 `user_id` 条件，
+  带空主体查询会静默读到全部用户数据；MCP 侧不写业务查询，一律调用领域服务
+- Open questions: 是否需要 MCP 专属的接入审计表（当前复用领域侧审计）；
+  限流与 TLS 在 M9 落地后是否可默认开启
+
 ## 尚未成为需求的部分
 
 - Skill 与工作风格（M7）、周报 / 学习建议 / 趋势分析（M8）、
-  MCP Server（M6）、生产化与数据生命周期（M9）：规格在设计文档，实现未开始，
+  生产化与数据生命周期（M9）：规格在设计文档，实现未开始，
   此处不预先写成需求以免与实现脱节。
 - 审计记录查询接口：只有写入侧，读取接口待 M9。
