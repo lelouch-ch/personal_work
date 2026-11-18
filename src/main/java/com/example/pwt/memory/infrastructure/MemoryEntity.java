@@ -1,6 +1,7 @@
 package com.example.pwt.memory.infrastructure;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import java.math.BigDecimal;
@@ -61,6 +62,14 @@ public class MemoryEntity {
     /** 来源对象 ID，通常是工作记录 ID。 */
     private String sourceId;
 
+    /**
+     * 归属项目，取自来源工作记录。
+     *
+     * <p>为 {@code null} 表示项目未知（人工提交且未带来源工作记录的记忆），
+     * 按项目过滤时不参与项目匹配打分，而不是被直接排除（设计文档 V10 迁移说明）。
+     */
+    private String projectId;
+
     /** 版本号，同一逻辑记忆递增。 */
     private Integer version;
 
@@ -87,4 +96,13 @@ public class MemoryEntity {
 
     /** 逻辑删除时间。 */
     private Instant deletedAt;
+
+    /**
+     * 全文检索相关度分数，来自 {@code MATCH(content, summary) AGAINST(...)} 的虚拟列，非表字段。
+     *
+     * <p>设计文档 11.4 要求相关度分项取该分数按候选集最大值归一化，因此必须把它读出来；
+     * 由 MyBatis 自动映射（本列不在实体列清单内，插入与更新不涉及）。非检索语句查出的实体为 {@code null}。
+     */
+    @TableField(exist = false)
+    private Double relevance;
 }

@@ -1,10 +1,12 @@
 package com.example.pwt.memory.infrastructure;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import java.time.Instant;
 import java.util.List;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 /**
  * 长期记忆表 Mapper。
@@ -31,7 +33,7 @@ public interface MemoryMapper extends BaseMapper<MemoryEntity> {
      */
     @Select("""
         SELECT id, user_id, memory_type, content, summary, normalized_hash, confidence, importance,
-               risk_level, visibility, status, source_type, source_id, version, supersedes_id,
+               risk_level, visibility, status, source_type, source_id, project_id, version, supersedes_id,
                valid_from, valid_until, expires_at, last_used_at, created_at, updated_at, deleted_at
         FROM pt_memory
         WHERE user_id = #{userId} AND memory_type = #{memoryType}
@@ -75,7 +77,7 @@ public interface MemoryMapper extends BaseMapper<MemoryEntity> {
     @Select("""
         <script>
         SELECT id, user_id, memory_type, content, summary, normalized_hash, confidence, importance,
-               risk_level, visibility, status, source_type, source_id, version, supersedes_id,
+               risk_level, visibility, status, source_type, source_id, project_id, version, supersedes_id,
                valid_from, valid_until, expires_at, last_used_at, created_at, updated_at, deleted_at,
                MATCH(content, summary) AGAINST(#{phrase} IN NATURAL LANGUAGE MODE) AS relevance
         FROM pt_memory
@@ -100,7 +102,7 @@ public interface MemoryMapper extends BaseMapper<MemoryEntity> {
      */
     @Select("""
         SELECT id, user_id, memory_type, content, summary, normalized_hash, confidence, importance,
-               risk_level, visibility, status, source_type, source_id, version, supersedes_id,
+               risk_level, visibility, status, source_type, source_id, project_id, version, supersedes_id,
                valid_from, valid_until, expires_at, last_used_at, created_at, updated_at, deleted_at
         FROM pt_memory WHERE id = #{id} FOR UPDATE
         """)
@@ -116,10 +118,131 @@ public interface MemoryMapper extends BaseMapper<MemoryEntity> {
      * @return 旧版本记忆
      */
     @Select("SELECT id, user_id, memory_type, content, summary, normalized_hash, confidence, importance,"
-        + " risk_level, visibility, status, source_type, source_id, version, supersedes_id, valid_from,"
+        + " risk_level, visibility, status, source_type, source_id, project_id, version, supersedes_id, valid_from,"
         + " valid_until, expires_at, last_used_at, created_at, updated_at, deleted_at FROM pt_memory"
         + " WHERE user_id = #{userId} AND memory_type = #{memoryType} AND status = 'approved'"
         + " AND deleted_at IS NULL AND id <> #{excludeId} ORDER BY created_at DESC LIMIT #{limit}")
     List<MemoryEntity> selectApprovedByType(@Param("userId") String userId, @Param("memoryType") String memoryType,
                                             @Param("excludeId") String excludeId, @Param("limit") int limit);
+
+    /**
+     * 布尔模式关键词召回，供 {@code search_memories} 与 Context Builder 使用（设计文档 11.3 第 3 步）。
+     *
+     * <p>这里用布尔模式而不是自然语言模式：检索串由 Context Builder 按 {@code ngram_token_size}
+     * 自行组装，运算符已在组装前剔除，符合 8.4 第 15 条对两种模式的分工约定。
+     * 长任务描述拆成 2-gram 后按 OR 取并集，命中词越多分数越高，天然形成相关度梯度；
+     * 自然语言模式按整串计算权重，长句会被自身的常见字稀释。
+     *
+     * <p>{@code relevance} 是虚拟列，值为该行的 {@code MATCH} 分数，由调用方按候选集最大值归一化
+     * （11.4），映射到 {@link MemoryEntity#getRelevance()}。
+     *
+     * <p>状态、有效期与项目过滤下推到 SQL；可见性判定留在 Java 层：它是跨模块复用的权限规则，
+     * 不适合复制进每条检索语句（见 {@link com.example.pwt.identity.domain.AccessPolicy}）。
+     *
+     * @param booleanQuery 已组装的布尔模式检索串，调用方保证非空
+     * @param types        记忆类型存储值，为空表示不限
+     * @param projectId    项目过滤，可为空
+     * @param now          有效期判定基准时刻
+     * @param limit        返回上限
+     * @return 候选记忆，按相关度倒序
+     */
+    @Select("""
+        <script>
+        SELECT id, user_id, memory_type, content, summary, normalized_hash, confidence, importance,
+               risk_level, visibility, status, source_type, source_id, project_id, version, supersedes_id,
+               valid_from, valid_until, expires_at, last_used_at, created_at, updated_at, deleted_at,
+               MATCH(content, summary) AGAINST(#{booleanQuery} IN BOOLEAN MODE) AS relevance
+        FROM pt_memory
+        WHERE status = 'approved' AND deleted_at IS NULL
+          AND (expires_at IS NULL OR expires_at &gt; #{now})
+          AND (valid_from IS NULL OR valid_from &lt;= #{now})
+          AND (valid_until IS NULL OR valid_until &gt;= #{now})
+          AND MATCH(content, summary) AGAINST(#{booleanQuery} IN BOOLEAN MODE) &gt; 0
+        <if test="types != null and types.size() > 0">
+          AND memory_type IN
+          <foreach collection="types" item="type" open="(" separator="," close=")">#{type}</foreach>
+        </if>
+        <if test="projectId != null">
+          AND (project_id = #{projectId} OR project_id IS NULL)
+        </if>
+        ORDER BY relevance DESC, created_at DESC
+        LIMIT #{limit}
+        </script>
+        """)
+    List<MemoryEntity> searchBoolean(@Param("booleanQuery") String booleanQuery,
+                                     @Param("types") List<String> types,
+                                     @Param("projectId") String projectId,
+                                     @Param("now") Instant now,
+                                     @Param("limit") int limit);
+
+    /**
+     * {@code LIKE} 兜底召回：全文检索空转时使用（设计文档 8.5 的单字退化、11.3 第 3 步）。
+     *
+     * <p>{@code ngram_token_size = 2} 下单字词永远命中不了索引，布尔检索会静默返回 0 行，
+     * 与“确实没有相关记忆”不可区分，因此必须保留子串匹配兜底。
+     *
+     * <p>代价是 {@code %词%} 用不上索引：范围由 {@code idx_memory_user_status_created}
+     * 先按 {@code user_id + status} 收敛到已批准且在有效期内的行，个人库该子集规模可控。
+     * 命中行由调用方记为固定低相关度（11.4）。
+     *
+     * @param likePatterns 已加通配符并转义的 LIKE 模式，调用方保证非空
+     * @param types        记忆类型存储值，为空表示不限
+     * @param projectId    项目过滤，可为空
+     * @param now          有效期判定基准时刻
+     * @param limit        返回上限
+     * @return 候选记忆，按创建时间倒序
+     */
+    @Select("""
+        <script>
+        SELECT id, user_id, memory_type, content, summary, normalized_hash, confidence, importance,
+               risk_level, visibility, status, source_type, source_id, project_id, version, supersedes_id,
+               valid_from, valid_until, expires_at, last_used_at, created_at, updated_at, deleted_at
+        FROM pt_memory
+        WHERE status = 'approved' AND deleted_at IS NULL
+          AND (expires_at IS NULL OR expires_at &gt; #{now})
+          AND (valid_from IS NULL OR valid_from &lt;= #{now})
+          AND (valid_until IS NULL OR valid_until &gt;= #{now})
+          AND (
+          <foreach collection="likePatterns" item="pattern" separator=" OR ">
+            content LIKE #{pattern} ESCAPE '\\\\' OR summary LIKE #{pattern} ESCAPE '\\\\'
+          </foreach>
+          )
+        <if test="types != null and types.size() > 0">
+          AND memory_type IN
+          <foreach collection="types" item="type" open="(" separator="," close=")">#{type}</foreach>
+        </if>
+        <if test="projectId != null">
+          AND (project_id = #{projectId} OR project_id IS NULL)
+        </if>
+        ORDER BY created_at DESC
+        LIMIT #{limit}
+        </script>
+        """)
+    List<MemoryEntity> searchByLike(@Param("likePatterns") List<String> likePatterns,
+                                    @Param("types") List<String> types,
+                                    @Param("projectId") String projectId,
+                                    @Param("now") Instant now,
+                                    @Param("limit") int limit);
+
+    /**
+     * 批量回写使用信号：把被上下文选中的记忆标记为刚使用过（设计文档 11.4）。
+     *
+     * <p>单条 UPDATE 而不是逐行 {@code updateById}：一次 {@code build_context} 可能命中数十条记忆，
+     * 逐行写会放大行锁与 binlog 开销，这正是 11.4 明确禁止主事务逐行写的原因。
+     *
+     * <p>调用方须在业务事务之外执行：使用信号是尽力而为的统计，失败只影响下次排序，
+     * 不该把整次上下文构建带回滚。
+     *
+     * @param memoryIds 记忆 ID 集合，调用方保证非空
+     * @param usedAt    使用时间
+     * @return 更新行数
+     */
+    @Update("""
+        <script>
+        UPDATE pt_memory SET last_used_at = #{usedAt}
+        WHERE id IN
+        <foreach collection="memoryIds" item="memoryId" open="(" separator="," close=")">#{memoryId}</foreach>
+        </script>
+        """)
+    int touchLastUsed(@Param("memoryIds") List<String> memoryIds, @Param("usedAt") Instant usedAt);
 }

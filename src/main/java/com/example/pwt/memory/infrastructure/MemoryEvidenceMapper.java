@@ -42,4 +42,28 @@ public interface MemoryEvidenceMapper extends BaseMapper<MemoryEvidenceEntity> {
      */
     @Select("SELECT COUNT(*) FROM pt_memory_evidence WHERE memory_id = #{memoryId}")
     long countByMemory(@Param("memoryId") String memoryId);
+
+    /**
+     * 批量取多条记忆的证据来源工作记录，供上下文包标注引用（设计文档 11.6 {@code source_refs}）。
+     *
+     * <p>一次 IN 查询而不是逐条查：一次 {@code build_context} 会注入十余条记忆，逐条回查
+     * 就是同等数量的往返。
+     *
+     * <p>刻意不取 {@code excerpt} 与 {@code source_metadata}：前者是 mediumtext 正文，
+     * 一次捞十几条没必要；后者是 JSON 列，注解 SQL 下不继承 {@code autoResultMap}
+     * 会被读成 null（设计文档 8.4 第 17 条），不选它就不存在这个坑。
+     *
+     * @param memoryIds 记忆 ID 集合，调用方保证非空
+     * @return 证据行，仅填充 id / userId / memoryId / workLogId / evidenceType / createdAt
+     */
+    @Select("""
+        <script>
+        SELECT id, user_id, memory_id, work_log_id, evidence_type, created_at
+        FROM pt_memory_evidence
+        WHERE work_log_id IS NOT NULL AND memory_id IN
+        <foreach collection="memoryIds" item="memoryId" open="(" separator="," close=")">#{memoryId}</foreach>
+        ORDER BY memory_id, created_at
+        </script>
+        """)
+    List<MemoryEvidenceEntity> selectWorkLogRefs(@Param("memoryIds") List<String> memoryIds);
 }

@@ -581,4 +581,136 @@ class MysqlDdlMigrationTest {
             + "', '" + taskType + "'"
             + (keyed ? ", '" + dedupRef + "'" : "") + ")";
     }
+
+    /**
+     * 校验 V10 新增的 {@code pt_context_access_log.project_id} 存在且可空（设计文档 11.3 第 9 步）。
+     *
+     * <p>该列记录本次上下文构建针对哪个项目。8.3 的原表没有它，事后就无法区分同一次任务里
+     * 项目内与项目外的召回，也就无法解释“为什么某个项目背景没进上下文”。
+     *
+     * @throws SQLException 数据库访问失败
+     */
+    @Test
+    void shouldRecordProjectOnContextAccessLog() throws SQLException {
+        String userId = insertUser("ctx-log");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO pt_context_access_log (id, user_id, task_summary, memory_ids,"
+                + " skill_ids) VALUES ('" + UUID.randomUUID() + "', '" + userId + "', '未指定项目的构建',"
+                + " JSON_ARRAY(), JSON_ARRAY())");
+            statement.executeUpdate("INSERT INTO pt_context_access_log (id, user_id, project_id, task_summary,"
+                + " memory_ids, skill_ids) VALUES ('" + UUID.randomUUID() + "', '" + userId + "', 'p-" + RUN_TAG
+                + "', '指定项目的构建', JSON_ARRAY(), JSON_ARRAY())");
+
+            try (ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM pt_context_access_log"
+                + " WHERE user_id = '" + userId + "' AND project_id IS NULL")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).as("未指定项目时应允许 NULL 而不是伪造值").isEqualTo(1);
+            }
+        }
+    }
+
+    /**
+     * 校验记忆与项目的关联列（V10）。
+     *
+     * <p>按项目过滤只能经 {@code pt_memory_evidence → pt_work_log} 两跳，而 Owner 手动提交、
+     * 以及提取时未带证据的记忆没有证据行，永远归属不到项目；这类记忆在按项目过滤时
+     * 会静默消失。V10 把归属落到列上，并允许为空表示“项目未知”。
+     *
+     * @throws SQLException 数据库访问失败
+     */
+    @Test
+    void shouldAllowProjectOnMemoryAndKeepNullMeaningUnknown() throws SQLException {
+        String userId = insertUser("mem-project");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.executeUpdate(memorySql(userId, "fact", "无项目归属的记忆", "approved"));
+            statement.executeUpdate("INSERT INTO pt_memory (id, user_id, memory_type, content, status, project_id)"
+                + " VALUES ('" + UUID.randomUUID() + "', '" + userId + "', 'fact', '属于某项目的记忆',"
+                + " 'approved', 'p-" + RUN_TAG + "')");
+
+            // 按项目检索要同时捞回“该项目”和“项目未知”两类：
+            // 全局偏好与约束通常没有项目归属，排除它们会让每次带项目的提问都丢掉用户风格
+            try (ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM pt_memory WHERE user_id = '" + userId
+                + "' AND (project_id = 'p-" + RUN_TAG + "' OR project_id IS NULL)")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).isEqualTo(2);
+            }
+        }
+    }
+
+    /**
+     * 校验按项目召回的两条路径都能走索引。
+     *
+     * <p>工作记录侧命中 V3 就有的 {@code idx_work_log_user_project}（前缀 {@code user_id, project_id}），
+     * 证据侧命中 V10 新增的 {@code idx_memory_evidence_work_log}——V10 刻意不在工作记录上再加一条，
+     * 同前缀重复索引只是多份写放大。
+     *
+     * <p>索引存在但未被使用不会报错，只会让查询变慢，因此按既有做法用 {@code EXPLAIN} 断言。
+     *
+     * @throws SQLException 数据库访问失败
+     */
+    @Test
+    void shouldUseIndexesForProjectScopedRecall() throws SQLException {
+        String userId = insertUser("idx-project");
+        // 必须先有项目行：fk_work_log_project 会拒绝指向不存在项目的写入，
+        // 这正是“按项目召回不会捞到野项目”的保障
+        String projectId = insertProject(userId, "索引验证项目");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            for (int i = 0; i < 200; i++) {
+                statement.executeUpdate(workLogSql(userId, "项目记录 " + i, null));
+            }
+            statement.executeUpdate("UPDATE pt_work_log SET project_id = '" + projectId + "' WHERE user_id = '"
+                + userId + "'");
+            statement.executeUpdate("INSERT INTO pt_memory (id, user_id, memory_type, content, status, project_id)"
+                + " VALUES ('" + UUID.randomUUID() + "', '" + userId + "', 'fact', '记忆', 'approved', '"
+                + projectId + "')");
+            statement.executeUpdate("INSERT INTO pt_memory_evidence (id, user_id, memory_id, work_log_id)"
+                + " SELECT '" + UUID.randomUUID() + "', '" + userId + "', m.id, w.id FROM pt_memory m,"
+                + " pt_work_log w WHERE m.user_id = '" + userId + "' AND w.user_id = '" + userId + "' LIMIT 1");
+            statement.execute("ANALYZE TABLE pt_work_log");
+
+            try (ResultSet rs = statement.executeQuery("EXPLAIN SELECT id FROM pt_work_log"
+                + " WHERE user_id = '" + userId + "' AND project_id = '" + projectId + "'")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("key")).as("按项目查工作记录应命中 idx_work_log_user_project")
+                    .isEqualTo("idx_work_log_user_project");
+            }
+            try (ResultSet rs = statement.executeQuery("EXPLAIN SELECT memory_id FROM pt_memory_evidence"
+                + " WHERE work_log_id = (SELECT MIN(id) FROM pt_work_log WHERE user_id = '" + userId + "')")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("key")).as("按工作记录反查证据应命中 idx_memory_evidence_work_log")
+                    .isEqualTo("idx_memory_evidence_work_log");
+            }
+        }
+    }
+
+    /**
+     * 创建本轮测试专用的项目记录。
+     *
+     * @param userId 所属用户
+     * @param name   项目名
+     * @return 项目 ID
+     * @throws SQLException 数据库访问失败
+     */
+    private static String insertProject(String userId, String name) throws SQLException {
+        String id = UUID.randomUUID().toString();
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO pt_project (id, user_id, name) VALUES ('" + id + "', '"
+                + userId + "', '" + name + "')");
+        }
+        return id;
+    }
+
+    /**
+     * 组装记忆插入语句。
+     *
+     * @param userId  所属用户
+     * @param type    记忆类型
+     * @param content 正文
+     * @param status  状态
+     * @return INSERT 语句
+     */
+    private static String memorySql(String userId, String type, String content, String status) {
+        return "INSERT INTO pt_memory (id, user_id, memory_type, content, status) VALUES ('"
+            + UUID.randomUUID() + "', '" + userId + "', '" + type + "', '" + content + "', '" + status + "')";
+    }
 }

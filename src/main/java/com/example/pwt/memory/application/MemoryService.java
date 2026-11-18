@@ -153,7 +153,8 @@ public class MemoryService {
         if (!duplicates.isEmpty()) {
             return accumulateEvidence(actor, duplicates.get(0), command, source, risk);
         }
-        MemoryEntity entity = insertMemory(actor, command, type, content, hash, risk, decision, evidenceCount);
+        MemoryEntity entity = insertMemory(actor, command, type, content, hash, risk, decision, evidenceCount,
+            source);
         insertEvidence(actor, entity, command, source, null);
         insertReview(actor, entity, decision, risk, conflicts, evidenceCount);
         auditRecorder.record(AuditEvent.of(actor.userId(), actor.actorType(), subjectId(actor),
@@ -356,6 +357,7 @@ public class MemoryService {
         revised.setConfidence(entity.getConfidence());
         revised.setSourceType(SourceType.MANUAL.getValue());
         revised.setSourceId(entity.getSourceId());
+        revised.setProjectId(entity.getProjectId());
         revised.setVersion(entity.getVersion() == null ? 2 : entity.getVersion() + 1);
         revised.setSupersedesId(entity.getId());
         revised.setValidFrom(entity.getValidFrom());
@@ -454,7 +456,8 @@ public class MemoryService {
         MemoryProposeCommand stripped = new MemoryProposeCommand(command.memoryType(), command.content(),
             null, null, command.sourceWorkLogId(), command.visibility(), command.confidence(),
             command.expiresAt(), command.extractionMetadata());
-        MemoryEntity entity = insertMemory(actor, stripped, type, REDACTED_CONTENT, null, risk, decision, 0);
+        // 拒绝路径不传来源：正文已脱敏，其来源工作记录也不再作为证据落库
+        MemoryEntity entity = insertMemory(actor, stripped, type, REDACTED_CONTENT, null, risk, decision, 0, null);
         insertEvidence(actor, entity, stripped, null, "redacted");
         insertReview(actor, entity, decision, risk, List.of(), 0);
         auditRecorder.record(AuditEvent.of(actor.userId(), actor.actorType(), subjectId(actor),
@@ -467,11 +470,22 @@ public class MemoryService {
                                             MemoryProposeCommand command, WorkLogEntity source,
                                             RiskLevel risk) {
         insertEvidence(actor, existing, command, source, "duplicate");
+        // 既有记忆可能来自人工提交（无项目归属），而这次重复提交带上了项目内的来源记录。
+        // 此时补齐归属，否则这条记忆在此后的按项目检索里始终缺席（V10 迁移说明）。
+        boolean projectBackfilled = existing.getProjectId() == null && source != null
+            && source.getProjectId() != null;
+        if (projectBackfilled) {
+            existing.setProjectId(source.getProjectId());
+        }
         long evidenceCount = evidenceMapper.countByMemory(existing.getId());
         MemoryStatus status = MemoryStatus.fromValue(existing.getStatus());
         if (status != MemoryStatus.CANDIDATE) {
             log.info("命中重复记忆, 仅累加证据 memoryId={} status={} evidenceCount={}",
                 existing.getId(), existing.getStatus(), evidenceCount);
+            if (projectBackfilled) {
+                existing.setUpdatedAt(Instant.now());
+                memoryMapper.updateById(existing);
+            }
             return existing;
         }
         ApprovalDecision decision = approvalPolicy.decide(new ApprovalPolicy.CandidateFacts(
@@ -494,7 +508,7 @@ public class MemoryService {
 
     private MemoryEntity insertMemory(ActorContext actor, MemoryProposeCommand command, MemoryType type,
                                       String content, String hash, RiskLevel risk,
-                                      ApprovalDecision decision, int evidenceCount) {
+                                      ApprovalDecision decision, int evidenceCount, WorkLogEntity source) {
         Instant now = Instant.now();
         MemoryEntity entity = new MemoryEntity();
         entity.setId(Uuids.randomUuidv7String());
@@ -509,6 +523,9 @@ public class MemoryService {
         entity.setVisibility(Visibility.fromValueOrDefault(command.visibility(), Visibility.PRIVATE).getValue());
         entity.setSourceType(sourceType(actor).getValue());
         entity.setSourceId(command.sourceWorkLogId() == null ? null : command.sourceWorkLogId().toString());
+        // 项目归属必须在 insert 之前落到实体上：insert 之后再改内存对象不会回写这一列，
+        // 端到端实测到的表现是接口返回带 projectId 而库里存的是 NULL
+        entity.setProjectId(source == null ? null : source.getProjectId());
         entity.setVersion(1);
         entity.setExpiresAt(command.expiresAt());
         entity.setCreatedAt(now);

@@ -80,6 +80,25 @@ pwt:
     max-retries: ${PWT_LLM_MAX_RETRIES:1}
     max-output-tokens: ${PWT_LLM_MAX_OUTPUT_TOKENS:2000}
     temperature: ${PWT_LLM_TEMPERATURE:0.2}
+  # Context Builder（设计文档 11.4、11.5）：候选规模与各段配额。
+  # 权重与评分规则固定在代码里（ContextWeights），这里只放需要按模型/语料调整的旋钮。
+  # type-quotas 顺序即优先级，缺省的类型不受限。
+  context:
+    default-token-budget: ${PWT_CONTEXT_TOKEN_BUDGET:4000}
+    min-token-budget: ${PWT_CONTEXT_MIN_TOKEN_BUDGET:500}
+    max-token-budget: ${PWT_CONTEXT_MAX_TOKEN_BUDGET:20000}
+    max-candidates: ${PWT_CONTEXT_MAX_CANDIDATES:60}
+    type-quotas:
+      - type: fact
+        limit: 4
+      - type: preference
+        limit: 3
+      - type: experience
+        limit: 4
+      - type: decision
+        limit: 3
+      - type: goal
+        limit: 2
 
 management:
   endpoints:

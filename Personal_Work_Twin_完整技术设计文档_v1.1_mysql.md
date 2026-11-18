@@ -848,6 +848,22 @@ CREATE TABLE pt_audit_log (
     实测两处踩坑：`pt_async_task.payload` 读成 null 使提取任务报“缺少 workLogId”全部失败重试（M4 发现）；`pt_work_log.tags` 在标签检索与全文检索结果中恒为空数组（M3 遗留，列表与详情走 `selectById`/`selectPage` 故正常，掩盖了问题）。
     约定：凡注解 SQL 选中 JSON 列，必须配 `@Results`/`@ResultMap` 显式绑定 `JacksonTypeHandler`；新增 JSON 列时同步检查该表所有注解 SQL。
     自动映射仍由 `map-underscore-to-camel-case` 负责，`@Results` 只声明 JSON 列即可，不必逐列重写。
+19. **注解 SQL 的 Java 文本块中，SQL 字面量里的反斜杠必须写成四个（`'\\\\'`）。**
+    文本块与普通字符串一样执行 Java 转义，源码里的 `'\\'` 只产出一个字符 `\`，落到 SQL 里是 `ESCAPE '\'`：
+    MySQL 把闭合引号前的反斜杠当作转义，吞掉引号与其后的 `#{}` 占位符，
+    实测（MySQL 9.3.0）`LIKE ... ESCAPE '\' OR summary LIKE ...` 报 `Parameter index out of range (6 > number of parameters, which is 5)`。
+    该错误只在真实调用时暴露，DDL 层面看不出问题，因此 `MemoryMapperSqlTest` 以注解值断言把写法锁死。
+20. **11.3 第 3 步的布尔检索需要由 Context Builder 先把输入组装成受控检索串，不能整句直送。**
+    布尔模式下长度 ≥ 2 的检索词按短语做相邻匹配，整句 `AGAINST('数据库连接池')` 等于要求原文出现完全连续的同一段文字，
+    实测换个说法召回就是 0。组装规则：剔除运算符 → 按空白与非字词字符切词元 → 按文字种类再切一刀
+    （`使用feign上传` 必须切成 `feign` 与中文两段，否则 ASCII 词与 ngram 2-gram 两套词条都命中不了）→ 中文段滑动展开为 2-gram。
+    单字查询组不出 2-gram，必须走第 15 条的 `LIKE` 兜底；`ContextQuery` 承担这套组装，`build_context` 与 `search_memories` 共用。
+21. **按项目过滤记忆时，`project_id IS NULL` 必须与命中项目同等保留。**
+    Owner 手动提交、以及提取时未带证据的记忆没有项目归属，若把它们当作“不匹配项目”排除，
+    每次带项目的提问都会丢掉用户偏好与全局约束——漏召回比多召回更难被发现。
+    归属明确但属于其它项目才排除，项目相关性由 `project_match` 分项参与排序。
+    `pt_memory.project_id` 由 V10 引入，写入端从来源工作记录带入；必须在 `insert` 之前落到实体上，
+    `insert` 之后再改内存对象不会回写该列（实测表现为接口返回带值而库里为 NULL）。
 
 ## 8.5 MySQL 服务器配置要求
 
@@ -883,12 +899,16 @@ src/main/resources/db/migration/
 ├── V6__create_style_constraint_decision_tables.sql
 ├── V7__create_report_task_tables.sql
 ├── V8__create_audit_context_tables.sql
-└── V9__add_async_task_dedup_key.sql
+├── V9__add_async_task_dedup_key.sql
+└── V10__add_context_project.sql
 ```
 
 - 索引与约束直接写在对应表的 `CREATE TABLE` 中（MySQL 的 `CREATE INDEX` 不支持 `WHERE` 部分索引，且分开写会让失败迁移更难回滚），因此不再保留 `V9__create_indexes_and_security.sql`。
 - 原计划的 `V9__add_seed_data.sql` 未启用：初始 Owner 由启动引导（`pwt.bootstrap`）在用户表为空时创建，测试数据由各测试自行插入，迁移里再塞种子数据反而会让“空库”与“已引导库”的判定变复杂。
   该版本号已让给 8.4 第 16 条的任务去重键；后续若确需种子数据，从 V10 起编号。
+- V10 是 M5 新增：`pt_context_access_log.project_id`（11.3 第 9 步要求记录本次上下文针对哪个项目）、
+  `pt_memory.project_id`（8.4 第 21 条）与 `pt_memory_evidence.work_log_id` 索引。
+  `pt_work_log` 侧不加索引：V3 的 `idx_work_log_user_project` 已覆盖同一前缀，重复建同名索引报 1061。
 - 建议使用 Testcontainers 启动真实 MySQL 做集成测试，不以 H2 代替 MySQL 的 JSON、生成列、多值索引、全文检索和锁行为验证；H2 的 MySQL 兼容模式不覆盖这些特性。
 
 ---

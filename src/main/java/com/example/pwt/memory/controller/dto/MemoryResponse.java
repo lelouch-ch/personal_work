@@ -19,6 +19,7 @@ import java.util.UUID;
  * @param status        状态
  * @param sourceType    来源
  * @param sourceId      来源对象 ID
+ * @param projectId     归属项目，为空表示项目未知
  * @param version       版本号
  * @param supersedesId  被替代的旧记忆 ID
  * @param validFrom     生效起始
@@ -30,7 +31,7 @@ import java.util.UUID;
  */
 public record MemoryResponse(UUID id, String memoryType, String content, String summary, BigDecimal confidence,
                              Integer importance, String riskLevel, String visibility, String status,
-                             String sourceType, UUID sourceId, Integer version, UUID supersedesId,
+                             String sourceType, UUID sourceId, UUID projectId, Integer version, UUID supersedesId,
                              Instant validFrom, Instant validUntil, Instant expiresAt,
                              Instant createdAt, Instant updatedAt) {
 
@@ -44,7 +45,8 @@ public record MemoryResponse(UUID id, String memoryType, String content, String 
         return new MemoryResponse(UUID.fromString(entity.getId()), entity.getMemoryType(),
             entity.getContent(), entity.getSummary(), entity.getConfidence(), entity.getImportance(),
             entity.getRiskLevel(), entity.getVisibility(), entity.getStatus(), entity.getSourceType(),
-            toUuid(entity.getSourceId()), entity.getVersion(), toUuid(entity.getSupersedesId()),
+            toUuid(entity.getSourceId()), toUuid(entity.getProjectId()), entity.getVersion(),
+            toUuid(entity.getSupersedesId()),
             entity.getValidFrom(), entity.getValidUntil(), entity.getExpiresAt(), entity.getCreatedAt(),
             entity.getUpdatedAt());
     }

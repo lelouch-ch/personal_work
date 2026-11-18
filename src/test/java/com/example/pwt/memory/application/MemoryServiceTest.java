@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -30,6 +31,7 @@ import com.example.pwt.memory.infrastructure.MemoryReviewEntity;
 import com.example.pwt.memory.infrastructure.MemoryReviewMapper;
 import com.example.pwt.work.infrastructure.WorkLogEntity;
 import com.example.pwt.work.infrastructure.WorkLogMapper;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -422,6 +424,59 @@ class MemoryServiceTest {
 
     private static MemoryProposeCommand command(MemoryType type, String content) {
         return command(type, content, null);
+    }
+
+    @Test
+    void shouldInheritProjectFromSourceWorkLog() {
+        UUID projectId = UUID.randomUUID();
+        UUID workLogId = UUID.randomUUID();
+        WorkLogEntity source = new WorkLogEntity();
+        source.setId(workLogId.toString());
+        source.setUserId(USER_ID.toString());
+        source.setProjectId(projectId.toString());
+        source.setContent("网关超时需要在预发环境单独验证");
+        when(workLogMapper.selectById(workLogId.toString())).thenReturn(source);
+        // 在 insert 的调用时刻取值，而不是抓引用后再读：实体是可变对象，
+        // 落库之后才补字段用引用断言是看不出来的（端到端就是这样漏掉过）
+        List<String> projectedAtInsert = new ArrayList<>();
+        doAnswer(invocation -> {
+            projectedAtInsert.add(((MemoryEntity) invocation.getArgument(0)).getProjectId());
+            return 1;
+        }).when(memoryMapper).insert(any(MemoryEntity.class));
+
+        service.propose(agent, new MemoryProposeCommand(MemoryType.EXPERIENCE.getValue(),
+            "网关超时需要在预发环境单独验证后再改配置", null, "预发环境单独验证", workLogId, null, 0.9d, null,
+            Map.of()));
+
+        // 记忆与项目的关系是推导出来的：只有来源工作记录知道它属于哪个项目。
+        // 不在写入端落列，按项目检索就得每次走证据两跳（V10 迁移说明）
+        assertThat(projectedAtInsert).containsExactly(projectId.toString());
+    }
+
+    @Test
+    void shouldBackfillProjectWhenDuplicateGainsASourcedEvidence() {
+        UUID projectId = UUID.randomUUID();
+        MemoryEntity existing = existing(MemoryType.EXPERIENCE, MemoryStatus.APPROVED);
+        existing.setProjectId(null);
+        when(memoryMapper.selectDuplicates(anyString(), anyString(), anyString(), any()))
+            .thenReturn(List.of(existing));
+        when(evidenceMapper.countByMemory(existing.getId())).thenReturn(2L);
+        when(memoryMapper.updateById(any(MemoryEntity.class))).thenReturn(1);
+        UUID workLogId = UUID.randomUUID();
+        WorkLogEntity source = new WorkLogEntity();
+        source.setId(workLogId.toString());
+        source.setUserId(USER_ID.toString());
+        source.setProjectId(projectId.toString());
+        source.setContent("项目使用 spring boot 3.2");
+        when(workLogMapper.selectById(workLogId.toString())).thenReturn(source);
+
+        MemoryEntity result = service.propose(agent, new MemoryProposeCommand(
+            MemoryType.EXPERIENCE.getValue(), "项目使用 Spring Boot 3.2", null, "spring boot 3.2", workLogId,
+            null, 0.9d, null, Map.of()));
+
+        // 既有记忆来自人工提交时没有项目归属，若不在这里补齐，它在此后的按项目检索里始终缺席
+        assertThat(result.getProjectId()).isEqualTo(projectId.toString());
+        verify(memoryMapper).updateById(existing);
     }
 
     private static MemoryProposeCommand command(MemoryType type, String content, String visibility) {
