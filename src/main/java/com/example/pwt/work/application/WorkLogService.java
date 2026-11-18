@@ -14,6 +14,12 @@ import com.example.pwt.common.error.ErrorCode;
 import com.example.pwt.common.util.Uuids;
 import com.example.pwt.identity.domain.AccessPolicy;
 import com.example.pwt.identity.domain.ActorContext;
+import com.example.pwt.task.application.TaskService;
+import com.example.pwt.task.domain.TaskPayload;
+import com.example.pwt.task.domain.TaskStatus;
+import com.example.pwt.task.domain.TaskType;
+import com.example.pwt.task.infrastructure.AsyncTaskEntity;
+import com.example.pwt.work.domain.ExtractionState;
 import com.example.pwt.work.domain.WorkLogStatus;
 import com.example.pwt.work.domain.WorkType;
 import com.example.pwt.work.infrastructure.ProjectEntity;
@@ -70,18 +76,22 @@ public class WorkLogService {
 
     private final AuditRecorder auditRecorder;
 
+    private final TaskService taskService;
+
     /**
      * 构造服务。
      *
      * @param workLogMapper 工作记录 Mapper
      * @param projectMapper 项目 Mapper，用于校验关联项目归属
      * @param auditRecorder 审计记录器
+     * @param taskService   异步任务服务，用于排队提取任务
      */
     public WorkLogService(WorkLogMapper workLogMapper, ProjectMapper projectMapper,
-                          AuditRecorder auditRecorder) {
+                          AuditRecorder auditRecorder, TaskService taskService) {
         this.workLogMapper = workLogMapper;
         this.projectMapper = projectMapper;
         this.auditRecorder = auditRecorder;
+        this.taskService = taskService;
     }
 
     /**
@@ -90,13 +100,17 @@ public class WorkLogService {
      * <p>幂等：携带 {@code idempotencyKey} 时，同一用户重复提交不产生第二条记录，
      * 而是返回既有记录（设计文档 17.3、验收用例 1）。
      *
+     * <p>新建成功后在同一事务内排队 {@code EXTRACT_MEMORY} 任务（设计文档 6.1 的 B→C 步、
+     * 验收用例 3）。同事务可保证业务回滚时不留悬空任务；任务按工作记录 ID 去重，
+     * 因此幂等命中或并发重复提交都不会排队两次。
+     *
      * @param actor   当前主体，Agent 需具备 {@code work:write}
      * @param command 记录内容
-     * @return 新建或已存在的记录
+     * @return 记录本体与本次是否排队了提取任务
      * @throws BizException 参数非法、关联项目不属于当前用户
      */
     @Transactional(rollbackFor = Exception.class)
-    public WorkLogEntity create(ActorContext actor, WorkLogCommand command) {
+    public WorkLogCreation create(ActorContext actor, WorkLogCommand command) {
         actor.requireScope(Scope.WORK_WRITE);
         validate(command);
         AccessPolicy.requireAssignable(actor, command.visibility());
@@ -112,7 +126,7 @@ public class WorkLogService {
         Optional<WorkLogEntity> existing = findByIdempotencyKey(actor, command.idempotencyKey());
         if (existing.isPresent()) {
             log.info("幂等命中, 返回既有记录 userId={} key={}", actor.userId(), command.idempotencyKey());
-            return existing.get();
+            return new WorkLogCreation(existing.get(), extractionState(actor, existing.get().getId()));
         }
 
         WorkLogEntity entity = new WorkLogEntity();
@@ -139,14 +153,39 @@ public class WorkLogService {
             workLogMapper.insert(entity);
         } catch (DuplicateKeyException e) {
             // 并发重复提交：唯一索引 uq_work_log_idempotency 拦截后回读既有记录，保持幂等语义
-            return findByIdempotencyKey(actor, command.idempotencyKey())
+            WorkLogEntity raced = findByIdempotencyKey(actor, command.idempotencyKey())
                 .orElseThrow(() -> new BizException(ErrorCode.IDEMPOTENCY_CONFLICT,
                     "幂等键冲突但未能回读既有记录", e));
+            return new WorkLogCreation(raced, extractionState(actor, raced.getId()));
         }
 
+        AsyncTaskEntity task = taskService.enqueue(actor.userId(), TaskType.EXTRACT_MEMORY, entity.getId(),
+            TaskPayload.ofWorkLog(UUID.fromString(entity.getId())));
         auditRecorder.record(AuditEvent.of(actor.userId(), actor.actorType(), subjectId(actor),
             "work_log.create", "work_log", UUID.fromString(entity.getId())));
-        return entity;
+        return new WorkLogCreation(entity, toExtractionState(TaskStatus.fromValue(task.getStatus())));
+    }
+
+    /**
+     * 读取指定记录当前的提取任务进度，用于幂等命中时的响应。
+     *
+     * @param actor 当前主体
+     * @param logId 工作记录 ID
+     * @return 提取进度，未排队时为 {@link ExtractionState#NOT_QUEUED}
+     */
+    public ExtractionState extractionState(ActorContext actor, String logId) {
+        AsyncTaskEntity task = taskService.find(actor.userId(), TaskType.EXTRACT_MEMORY, logId);
+        return task == null ? ExtractionState.NOT_QUEUED
+            : toExtractionState(TaskStatus.fromValue(task.getStatus()));
+    }
+
+    private static ExtractionState toExtractionState(TaskStatus status) {
+        return switch (status) {
+            case PENDING -> ExtractionState.QUEUED;
+            case RUNNING -> ExtractionState.RUNNING;
+            case SUCCEEDED -> ExtractionState.SUCCEEDED;
+            case FAILED, CANCELLED -> ExtractionState.FAILED;
+        };
     }
 
     /**

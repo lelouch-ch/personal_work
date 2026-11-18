@@ -1,6 +1,8 @@
 package com.example.pwt.work.controller.dto;
 
+import com.example.pwt.work.domain.ExtractionState;
 import com.example.pwt.work.infrastructure.WorkLogEntity;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -19,40 +21,42 @@ import java.util.UUID;
  * @param status           状态
  * @param occurredAt       发生时间
  * @param tags             标签，已按小写归一
- * @param memoryExtraction 记忆提取状态
+ * @param memoryExtraction 记忆提取进度，取自 {@code pt_async_task}；列表不逐行解析该状态，此时字段省略
  * @param createdAt        创建时间
  * @param updatedAt        更新时间
  * @author pwt
  */
 public record WorkLogResponse(UUID id, UUID projectId, String sourceType, String title, String summary,
                               String content, String workType, String visibility, String status,
-                              Instant occurredAt, List<String> tags, String memoryExtraction,
+                              Instant occurredAt, List<String> tags,
+                              @JsonInclude(JsonInclude.Include.NON_NULL) String memoryExtraction,
                               Instant createdAt, Instant updatedAt) {
 
-    /** 记忆提取待排队：M4 的异步任务表接入后由 Worker 置为此值。 */
-    public static final String EXTRACTION_QUEUED = "queued";
-
-    /** 记忆提取尚未启用：当前版本未创建提取任务，如实返回而不是假称已排队。 */
-    public static final String EXTRACTION_NOT_QUEUED = "notQueued";
-
     /**
-     * 由持久化对象构造响应。
+     * 由持久化对象构造响应，不附带提取进度。
+     *
+     * <p>用于列表：逐行回查 {@code pt_async_task} 会对一页数据产生同等数量的额外查询，
+     * 而列表并不需要这个字段。宁可不返回，也不返回一个没有解析过的固定值。
      *
      * @param entity 工作记录实体
      * @return 响应对象
      */
     public static WorkLogResponse from(WorkLogEntity entity) {
-        return from(entity, EXTRACTION_NOT_QUEUED);
+        return build(entity, null);
     }
 
     /**
-     * 由持久化对象构造响应并指定记忆提取状态。
+     * 由持久化对象构造响应并附带真实的提取进度。
      *
-     * @param entity           工作记录实体
-     * @param memoryExtraction 记忆提取状态
+     * @param entity     工作记录实体
+     * @param extraction 提取进度，来自任务表；为 {@code null} 时省略该字段
      * @return 响应对象
      */
-    public static WorkLogResponse from(WorkLogEntity entity, String memoryExtraction) {
+    public static WorkLogResponse from(WorkLogEntity entity, ExtractionState extraction) {
+        return build(entity, extraction == null ? null : extraction.getValue());
+    }
+
+    private static WorkLogResponse build(WorkLogEntity entity, String memoryExtraction) {
         List<String> tags = entity.getTags() == null ? List.of() : List.copyOf(entity.getTags());
         return new WorkLogResponse(UUID.fromString(entity.getId()),
             entity.getProjectId() == null ? null : UUID.fromString(entity.getProjectId()),

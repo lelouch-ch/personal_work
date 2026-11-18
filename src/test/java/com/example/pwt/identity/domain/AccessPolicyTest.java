@@ -24,6 +24,8 @@ class AccessPolicyTest {
     private final ActorContext agent = ActorContext.agent(UUID.randomUUID(), UUID.randomUUID(),
         Set.of(Scope.PROFILE_READ));
 
+    private final ActorContext system = ActorContext.system(UUID.randomUUID());
+
     @Test
     void ownerShouldReadEveryVisibility() {
         for (Visibility visibility : Visibility.values()) {
@@ -92,6 +94,34 @@ class AccessPolicyTest {
         assertThat(AccessPolicy.visibilityCondition(owner)).isEqualTo("1 = 1");
         assertThat(AccessPolicy.visibilityCondition(agent)).isEqualTo("visibility IN ('agent', 'public')");
         assertThat(AccessPolicy.visibilityCondition(null)).isEqualTo("visibility = 'public'");
+    }
+
+    @Test
+    void systemActorShouldReadPrivateOfItsOwnUser() {
+        // ADR-024：Worker 替用户处理自有数据，必须能读到 private 工作记录，
+        // 否则“工作记录 → 候选记忆”无法自动进行；隔离由 user_id 而非可见性承担
+        for (Visibility visibility : Visibility.values()) {
+            assertThat(AccessPolicy.readableBy(system, visibility.getValue()))
+                .as("系统主体应可读 %s", visibility).isTrue();
+        }
+        assertThat(AccessPolicy.visibilityCondition(system)).isEqualTo("1 = 1");
+    }
+
+    @Test
+    void systemActorMustNotPublishPublic() {
+        // 对外发布权只属于 Owner：Worker 不得把数据提升到 public
+        assertThatThrownBy(() -> AccessPolicy.requireAssignable(system, "public"))
+            .isInstanceOf(BizException.class)
+            .hasFieldOrPropertyWithValue("errorCode", ErrorCode.VALIDATION_ERROR);
+        assertThatCode(() -> AccessPolicy.requireAssignable(system, "agent")).doesNotThrowAnyException();
+    }
+
+    @Test
+    void systemActorShouldBypassScopeChecks() {
+        assertThatCode(() -> system.requireScope(Scope.MEMORY_PROPOSE)).doesNotThrowAnyException();
+        assertThat(system.hasScope("anything")).isTrue();
+        assertThat(system.isSystem()).isTrue();
+        assertThat(system.isOwner()).isFalse();
     }
 
     @Test

@@ -6,6 +6,7 @@ import com.example.pwt.common.api.PageQuery;
 import com.example.pwt.common.api.PageResult;
 import com.example.pwt.common.web.RequestContext;
 import com.example.pwt.identity.domain.ActorContext;
+import com.example.pwt.work.application.WorkLogCreation;
 import com.example.pwt.work.application.WorkLogCommand;
 import com.example.pwt.work.application.WorkLogService;
 import com.example.pwt.work.controller.dto.WorkLogRequest;
@@ -59,7 +60,8 @@ public class WorkLogController {
      * @param actor          当前主体，需 {@code work:write}
      * @param idempotencyKey 幂等键，可为空
      * @param request        记录内容
-     * @return 新建记录；命中幂等键时返回既有记录，HTTP 仍为 201
+     * @return 新建记录，{@code memoryExtraction=queued}；命中幂等键时返回既有记录，
+     *         且 {@code memoryExtraction} 反映该记录当前的排队状态，HTTP 仍为 201
      */
     @PostMapping
     public ResponseEntity<ApiResponse<WorkLogResponse>> create(@CurrentActor ActorContext actor,
@@ -68,8 +70,8 @@ public class WorkLogController {
         WorkLogCommand command = new WorkLogCommand(request.projectId(), request.title(), request.summary(),
             request.content(), request.workType(), request.occurredAt(), request.tags(),
             request.visibility(), idempotencyKey);
-        WorkLogEntity entity = workLogService.create(actor, command);
-        WorkLogResponse data = WorkLogResponse.from(entity);
+        WorkLogCreation creation = workLogService.create(actor, command);
+        WorkLogResponse data = WorkLogResponse.from(creation.entity(), creation.extraction());
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(data, RequestContext.requestId()));
     }
 
@@ -138,7 +140,9 @@ public class WorkLogController {
     @GetMapping("/{logId}")
     public ResponseEntity<ApiResponse<WorkLogResponse>> get(@CurrentActor ActorContext actor,
         @PathVariable UUID logId) {
-        WorkLogResponse data = WorkLogResponse.from(workLogService.requireReadable(actor, logId));
+        WorkLogEntity entity = workLogService.requireReadable(actor, logId);
+        WorkLogResponse data = WorkLogResponse.from(entity,
+            workLogService.extractionState(actor, entity.getId()));
         return ResponseEntity.ok(ApiResponse.ok(data, RequestContext.requestId()));
     }
 
@@ -153,7 +157,9 @@ public class WorkLogController {
     @PutMapping("/{logId}/visibility")
     public ResponseEntity<ApiResponse<WorkLogResponse>> updateVisibility(@CurrentActor ActorContext actor,
         @PathVariable UUID logId, @RequestParam String visibility) {
-        WorkLogResponse data = WorkLogResponse.from(workLogService.updateVisibility(actor, logId, visibility));
+        WorkLogEntity entity = workLogService.updateVisibility(actor, logId, visibility);
+        WorkLogResponse data = WorkLogResponse.from(entity,
+            workLogService.extractionState(actor, entity.getId()));
         return ResponseEntity.ok(ApiResponse.ok(data, RequestContext.requestId()));
     }
 

@@ -22,6 +22,7 @@ import org.springframework.test.web.servlet.MockMvc;
 @SpringBootTest(properties = {
     "spring.flyway.enabled=false",
     "pwt.bootstrap.enabled=false",
+    "pwt.task.enabled=false",
     "pwt.identity.owner-jwt-secret=public-endpoint-test-secret-long-enough-32"
 })
 @AutoConfigureMockMvc

@@ -1,11 +1,15 @@
 package com.example.pwt.work.infrastructure;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import java.time.Instant;
 import java.util.List;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Result;
+import org.apache.ibatis.annotations.ResultMap;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Results;
 
 /**
  * 工作记录表 Mapper。
@@ -17,10 +21,19 @@ import org.apache.ibatis.annotations.Select;
  * <p>本表带 user_id 列且不在多租户白名单内，注解 SQL 会被 {@code TenantLineInnerInterceptor}
  * 自动追加 {@code user_id = ?}；调用方仍需自行按可见性过滤。
  *
+ * <p>两条检索语句都要显式声明 {@code tags} 的 JSON 类型处理器：实体的
+ * {@code @TableName(autoResultMap = true)} 只对 MyBatis-Plus 自动生成的语句生效，
+ * 注解 SQL 不继承它，因此 {@code tags} 会被读成 null。
+ * 实测该遗漏使标签/关键词检索返回的记录标签全为空数组，
+ * 调用方无法核对命中标签，也无法据此做后续归并。
+ *
  * @author pwt
  */
 @Mapper
 public interface WorkLogMapper extends BaseMapper<WorkLogEntity> {
+
+    /** JSON 列的显式映射标识，供两条检索语句复用。 */
+    String TAGS_RESULTS = "workLogTagsResults";
 
     /**
      * 按标签检索活跃记录。
@@ -33,6 +46,9 @@ public interface WorkLogMapper extends BaseMapper<WorkLogEntity> {
      * @param limit 返回条数上限
      * @return 命中的记录，按发生时间倒序
      */
+    @Results(id = TAGS_RESULTS, value = {
+        @Result(column = "tags", property = "tags", typeHandler = JacksonTypeHandler.class)
+    })
     @Select("""
         <script>
         SELECT id, user_id, project_id, agent_client_id, source_type, title, summary, content,
@@ -64,6 +80,7 @@ public interface WorkLogMapper extends BaseMapper<WorkLogEntity> {
      * @param limit  返回条数上限
      * @return 命中的记录，按相关度倒序
      */
+    @ResultMap(TAGS_RESULTS)
     @Select("""
         <script>
         SELECT id, user_id, project_id, agent_client_id, source_type, title, summary, content,

@@ -206,6 +206,38 @@ class MysqlDdlMigrationTest {
     }
 
     /**
+     * 校验任务去重键的生成列与唯一索引（V9，设计文档 17.3）。
+     *
+     * <p>只确认迁移能跑不够：去重键若没真正生效，同一条工作记录会被并发排队两次，
+     * 表现为候选记忆成倍增长而不报错，属于静默劣化审核体验的问题。
+     *
+     * @throws SQLException 数据库访问失败
+     */
+    @Test
+    void shouldEnforceTaskDedupThroughGeneratedColumn() throws SQLException {
+        String userId = insertUser("taskdedup-1");
+        String otherUserId = insertUser("taskdedup-2");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            // 无 dedup_ref 时生成列为 NULL，不参与唯一判定：同类任务可以并行排队
+            assertThat(statement.executeUpdate(taskSql(userId, "EXTRACT_MEMORY", null))).isEqualTo(1);
+            assertThat(statement.executeUpdate(taskSql(userId, "EXTRACT_MEMORY", null))).isEqualTo(1);
+            assertThat(statement.executeUpdate(taskSql(userId, "EXTRACT_MEMORY", "log-1"))).isEqualTo(1);
+
+            // 同用户、同类型、同业务对象重复排队必须被 uq_async_task_dedup 拦截
+            assertThatThrownBy(() -> statement.executeUpdate(taskSql(userId, "EXTRACT_MEMORY", "log-1")))
+                .isInstanceOf(SQLIntegrityConstraintViolationException.class)
+                .hasMessageContaining("uq_async_task_dedup");
+
+            // 换一个业务对象、换一个任务类型都不算重复
+            assertThat(statement.executeUpdate(taskSql(userId, "EXTRACT_MEMORY", "log-2"))).isEqualTo(1);
+            assertThat(statement.executeUpdate(taskSql(userId, "REBUILD_SEARCH_INDEX", "log-1"))).isEqualTo(1);
+
+            // 不同用户使用同一业务对象不得冲突：生成列已把 user_id 编入键值
+            assertThat(statement.executeUpdate(taskSql(otherUserId, "EXTRACT_MEMORY", "log-1"))).isEqualTo(1);
+        }
+    }
+
+    /**
      * 校验 ngram 解析器可召回中文内容（设计文档 8.5 的分词前提）。
      *
      * @throws SQLException 数据库访问失败
@@ -532,5 +564,21 @@ class MysqlDdlMigrationTest {
         return "INSERT INTO pt_resume (id, user_id, version, title, content_md, is_current) VALUES ('"
             + UUID.randomUUID() + "', '" + userId + "', " + version + ", '简历 v" + version
             + "', '# 内容', " + (current ? 1 : 0) + ")";
+    }
+
+    /**
+     * 组装异步任务插入语句。
+     *
+     * @param userId   所属用户
+     * @param taskType 任务类型
+     * @param dedupRef 去重引用，为空时省略该列
+     * @return INSERT 语句
+     */
+    private static String taskSql(String userId, String taskType, String dedupRef) {
+        boolean keyed = dedupRef != null;
+        return "INSERT INTO pt_async_task (id, user_id, task_type"
+            + (keyed ? ", dedup_ref" : "") + ") VALUES ('" + UUID.randomUUID() + "', '" + userId
+            + "', '" + taskType + "'"
+            + (keyed ? ", '" + dedupRef + "'" : "") + ")";
     }
 }

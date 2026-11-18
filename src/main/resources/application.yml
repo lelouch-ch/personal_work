@@ -52,6 +52,34 @@ pwt:
     username: ${PWT_BOOTSTRAP_USERNAME:owner}
     password: ${PWT_BOOTSTRAP_PASSWORD:}
     display-name: ${PWT_BOOTSTRAP_DISPLAY_NAME:Owner}
+  # 异步任务 Worker（设计文档 17.2）：领取与租约参数。
+  # lease-duration 必须大于单任务最长正常执行时间，否则租约回收会把仍在执行的任务重复投递。
+  task:
+    enabled: ${PWT_TASK_ENABLED:true}
+    poll-interval: ${PWT_TASK_POLL_INTERVAL:5s}
+    batch-size: ${PWT_TASK_BATCH_SIZE:10}
+    lease-duration: ${PWT_TASK_LEASE_DURATION:5m}
+    recovery-interval: ${PWT_TASK_RECOVERY_INTERVAL:60s}
+    backoff-base: ${PWT_TASK_BACKOFF_BASE:30s}
+    max-retry-attempts: ${PWT_TASK_MAX_RETRIES:5}
+  # 记忆自动批准阈值（设计文档 6.3）：阈值可配置而不是硬编码。
+  # max-auto-approve-risk-level 提高一档即放宽自动批准，L2 及以上默认必须人工审核。
+  memory:
+    auto-approve-enabled: ${PWT_MEMORY_AUTO_APPROVE:true}
+    max-auto-approve-risk-level: ${PWT_MEMORY_MAX_AUTO_RISK:L1}
+    auto-approve-min-confidence: ${PWT_MEMORY_MIN_CONFIDENCE:0.85}
+    preference-min-evidence: ${PWT_MEMORY_PREFERENCE_MIN_EVIDENCE:2}
+  # LLM Provider（设计文档 12.1）：endpoint 与 api-key 同时配置才会启用真实调用，
+  # 否则退化为“未配置”实现，提取任务会明确失败并重试，不会伪造提取结果。
+  llm:
+    provider-code: ${PWT_LLM_PROVIDER:openai-compatible}
+    endpoint: ${PWT_LLM_ENDPOINT:}
+    model: ${PWT_LLM_MODEL:gpt-4o-mini}
+    api-key: ${PWT_LLM_API_KEY:}
+    timeout: ${PWT_LLM_TIMEOUT:60s}
+    max-retries: ${PWT_LLM_MAX_RETRIES:1}
+    max-output-tokens: ${PWT_LLM_MAX_OUTPUT_TOKENS:2000}
+    temperature: ${PWT_LLM_TEMPERATURE:0.2}
 
 management:
   endpoints:

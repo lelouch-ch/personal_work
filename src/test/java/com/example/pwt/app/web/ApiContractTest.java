@@ -24,6 +24,7 @@ import com.example.pwt.identity.application.OwnerTokenService;
 @SpringBootTest(properties = {
     "spring.flyway.enabled=false",
     "pwt.bootstrap.enabled=false",
+    "pwt.task.enabled=false",
     "pwt.identity.owner-jwt-secret=contract-test-secret-key-long-enough-32-char"
 })
 @AutoConfigureMockMvc

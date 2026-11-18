@@ -835,6 +835,19 @@ CREATE TABLE pt_audit_log (
 15. **`MATCH ... AGAINST` 的检索模式取决于输入来源，不可一律用布尔模式。** 布尔模式把输入中的 `( ) + - " * ~` 当作运算符，实测（MySQL 9.3.0，ngram_token_size=2）对含“上传文件失败排查”的表执行 `AGAINST('(上传' IN BOOLEAN MODE)` 返回 **0 行且不报错**，同语句改用 `IN NATURAL LANGUAGE MODE` 命中 1 行；`+上传 -文件` 这类用户误输入同样会静默清空结果。
     约定：**原始用户输入（工作记录关键词检索、`capture_work_log` 落库后的查询）一律使用自然语言模式**，因为输入不可控且无法保证运算符闭合；**布尔模式只用于 Context Builder 自行组装的检索串**（11.3 第 3 步），组装前必须剔除或转义运算符字符。两种模式的相关度分数不可跨模式比较，混用会破坏 11.4 的归一化。
     该回归由 `MysqlDdlMigrationTest#shouldLoseRecallWhenRawInputGoesThroughBooleanMode` 锁定。
+16. 17.3 只要求任务“重复执行前检查是否已完成”，没有数据库级约束：并发提交同一业务对象时，先查后插会排队两个 `EXTRACT_MEMORY` 任务，表现为候选记忆成倍增长而不报错。沿用 ADR-021 以 V9 补 `dedup_ref` + STORED 生成列 `dedup_key`（`user_id#task_type#dedup_ref`）+ 唯一索引。
+    实测 MySQL 9.3.0：生成列的三种写法（显式 `COLLATE utf8mb4_bin`、完全不写排序规则、`CHARACTER SET ascii`）均可建表并正确拒绝重复；`dedup_ref` 为 NULL 时生成列为 NULL，不参与唯一判定，因此“不去重”的任务仍可并行排队。与第 8 条不同，这里不要求生成列字符集与表达式推导一致，`CONCAT` 结果落在表默认 `utf8mb4` 上即可。回归见 `MysqlDdlMigrationTest#shouldEnforceTaskDedupThroughGeneratedColumn`。
+17. **`FOR UPDATE SKIP LOCKED` 的领取语句必须关掉 MyBatis-Plus 租户插件**（`@InterceptorIgnore(tenantLine = "true")`）。
+    实测（MySQL 9.3.0 + MyBatis-Plus 3.5.6）：`TenantLineInnerInterceptor` 会重新解析并拼装 SQL，把 `FOR UPDATE SKIP LOCKED` 挪到 `ORDER BY`/`LIMIT` **之前**，生成
+    `... WHERE ... FOR UPDATE SKIP LOCKED ORDER BY created_at LIMIT ?` 这样的非法语法，MySQL 直接报语法错误。
+    关键在于**即使当前线程没有主体上下文、插件实际不追加 `user_id` 条件，它仍会走一次 SQL 重建**，因此“登录/启动场景不加条件”的兜底救不了这条语句。
+    症状是 Worker 每轮领取都抛异常、任务永远停在 `pending`，看起来像“没有 LLM 所以没产出”，容易被误判。
+    领取与租约回收天然跨用户，本就不该带租户条件；成功/失败回写则保留租户条件作为归属保险。
+18. **注解 SQL 不继承实体的 `@TableName(autoResultMap = true)`，所有 JSON 列必须显式声明类型处理器。**
+    `autoResultMap` 只对 MyBatis-Plus 自动生成的语句（`selectById`、`selectList` 等）生效；`@Select`/`@Update` 注解 SQL 使用默认结果映射，`json` 列因无 `JacksonTypeHandler` 被读成 `null`。
+    实测两处踩坑：`pt_async_task.payload` 读成 null 使提取任务报“缺少 workLogId”全部失败重试（M4 发现）；`pt_work_log.tags` 在标签检索与全文检索结果中恒为空数组（M3 遗留，列表与详情走 `selectById`/`selectPage` 故正常，掩盖了问题）。
+    约定：凡注解 SQL 选中 JSON 列，必须配 `@Results`/`@ResultMap` 显式绑定 `JacksonTypeHandler`；新增 JSON 列时同步检查该表所有注解 SQL。
+    自动映射仍由 `map-underscore-to-camel-case` 负责，`@Results` 只声明 JSON 列即可，不必逐列重写。
 
 ## 8.5 MySQL 服务器配置要求
 
@@ -870,10 +883,12 @@ src/main/resources/db/migration/
 ├── V6__create_style_constraint_decision_tables.sql
 ├── V7__create_report_task_tables.sql
 ├── V8__create_audit_context_tables.sql
-└── V9__add_seed_data.sql
+└── V9__add_async_task_dedup_key.sql
 ```
 
 - 索引与约束直接写在对应表的 `CREATE TABLE` 中（MySQL 的 `CREATE INDEX` 不支持 `WHERE` 部分索引，且分开写会让失败迁移更难回滚），因此不再保留 `V9__create_indexes_and_security.sql`。
+- 原计划的 `V9__add_seed_data.sql` 未启用：初始 Owner 由启动引导（`pwt.bootstrap`）在用户表为空时创建，测试数据由各测试自行插入，迁移里再塞种子数据反而会让“空库”与“已引导库”的判定变复杂。
+  该版本号已让给 8.4 第 16 条的任务去重键；后续若确需种子数据，从 V10 起编号。
 - 建议使用 Testcontainers 启动真实 MySQL 做集成测试，不以 H2 代替 MySQL 的 JSON、生成列、多值索引、全文检索和锁行为验证；H2 的 MySQL 兼容模式不覆盖这些特性。
 
 ---
@@ -1808,6 +1823,8 @@ WHERE status = 'running'
 | ADR-021 | 生成列替代部分索引 | MySQL 不支持 `CREATE UNIQUE INDEX ... WHERE`，用 STORED 生成列实现同等唯一约束 |
 | ADR-022 | 审计与上下文访问日志不设 user_id 外键 | 审计走独立事务，外键会对未提交的父行加共享锁导致 1205 锁等待；引用完整性交由业务层与保留策略保证 |
 | ADR-023 | 可见性三档阶梯集中判定 | 5.3 与 9.6 叠加后的矩阵原先未定义；固化为 private 仅 Owner、agent 需 scope、public 可匿名，并由单一策略组件实现 |
+| ADR-024 | 系统主体按 Owner 同档读取、但不得对外发布 | 异步 Worker 必须读用户的 private 工作记录才能产出候选记忆，否则 6.1 的自动闭环不成立；读取放开、`public` 赋值权仍只属于 Owner，隔离由 user_id 承担，避免为此新增一类豁免表 |
+| ADR-025 | 未配置 LLM 时显式失败而非返回空结果 | “提取到 0 条候选”是合法业务结论，若与“Provider 未接线”共用同一表现，故障会被误读为正常；不可用时抛 `LLM_PROVIDER_ERROR` 让任务重试（19.2 用例 14） |
 
 ---
 

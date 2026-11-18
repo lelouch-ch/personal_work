@@ -3,6 +3,7 @@ package com.example.pwt.work.application;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -12,6 +13,11 @@ import com.example.pwt.common.api.Scope;
 import com.example.pwt.common.error.BizException;
 import com.example.pwt.common.error.ErrorCode;
 import com.example.pwt.identity.domain.ActorContext;
+import com.example.pwt.task.application.TaskService;
+import com.example.pwt.task.domain.TaskStatus;
+import com.example.pwt.task.domain.TaskType;
+import com.example.pwt.task.infrastructure.AsyncTaskEntity;
+import com.example.pwt.work.domain.ExtractionState;
 import com.example.pwt.work.infrastructure.ProjectMapper;
 import com.example.pwt.work.infrastructure.WorkLogEntity;
 import com.example.pwt.work.infrastructure.WorkLogMapper;
@@ -49,6 +55,9 @@ class WorkLogServiceTest {
     @Mock
     private AuditRecorder auditRecorder;
 
+    @Mock
+    private TaskService taskService;
+
     private WorkLogService service;
 
     private ActorContext owner;
@@ -57,9 +66,12 @@ class WorkLogServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new WorkLogService(workLogMapper, projectMapper, auditRecorder);
+        service = new WorkLogService(workLogMapper, projectMapper, auditRecorder, taskService);
         owner = ActorContext.owner(USER_ID);
         agent = ActorContext.agent(USER_ID, AGENT_ID, Set.of(Scope.WORK_READ, Scope.WORK_WRITE));
+        // 建档后总会排队提取任务，给一个默认返回，让不关心该行为的用例保持原样；
+        // 用 lenient 是因为只校验参数非法的用例不会走到入队。
+        lenient().when(taskService.enqueue(any(), any(), any(), any())).thenReturn(pendingTask());
     }
 
     @Test
@@ -78,7 +90,7 @@ class WorkLogServiceTest {
     void shouldDefaultToPrivateVisibilityForAgent() {
         when(workLogMapper.insert(any(WorkLogEntity.class))).thenReturn(1);
 
-        WorkLogEntity saved = service.create(owner, command(null, null));
+        WorkLogEntity saved = service.create(owner, command(null, null)).entity();
 
         assertThat(saved.getVisibility()).isEqualTo("private");
         assertThat(saved.getWorkType()).isEqualTo("general");
@@ -91,7 +103,7 @@ class WorkLogServiceTest {
     void shouldMarkAgentSubmissionsWithAgentSource() {
         when(workLogMapper.insert(any(WorkLogEntity.class))).thenReturn(1);
 
-        WorkLogEntity saved = service.create(agent, command(null, null));
+        WorkLogEntity saved = service.create(agent, command(null, null)).entity();
 
         assertThat(saved.getSourceType()).isEqualTo("agent");
         assertThat(saved.getAgentClientId()).isEqualTo(AGENT_ID.toString());
@@ -200,6 +212,57 @@ class WorkLogServiceTest {
         assertThatThrownBy(() -> service.searchByKeyword(owner, " ", 10))
             .isInstanceOf(BizException.class)
             .hasMessageContaining("关键词");
+    }
+
+    @Test
+    void shouldQueueExtractionTaskOnCreate() {
+        when(workLogMapper.insert(any(WorkLogEntity.class))).thenReturn(1);
+        when(taskService.enqueue(any(), any(), any(), any())).thenReturn(pendingTask());
+
+        WorkLogCreation creation = service.create(owner, command(null, null));
+
+        assertThat(creation.extraction()).isEqualTo(ExtractionState.QUEUED);
+        verify(taskService).enqueue(org.mockito.ArgumentMatchers.eq(USER_ID),
+            org.mockito.ArgumentMatchers.eq(TaskType.EXTRACT_MEMORY), any(), any());
+    }
+
+    @Test
+    void shouldNotQueueTwiceWhenIdempotencyHits() {
+        WorkLogEntity existing = entity("private");
+        when(workLogMapper.selectOne(any())).thenReturn(existing);
+        when(taskService.find(USER_ID, TaskType.EXTRACT_MEMORY, existing.getId())).thenReturn(pendingTask());
+
+        WorkLogCommand keyed = new WorkLogCommand(null, "标题", null, null, null, Instant.now(),
+            List.of(), null, "same-key");
+        WorkLogCreation creation = service.create(owner, keyed);
+
+        assertThat(creation.entity()).isSameAs(existing);
+        // 已有任务处于排队中，响应应如实报 queued 而不是 notQueued
+        assertThat(creation.extraction()).isEqualTo(ExtractionState.QUEUED);
+        verify(taskService, never()).enqueue(any(), any(), any(), any());
+    }
+
+    @Test
+    void shouldReportSucceededWhenTaskAlreadyDone() {
+        WorkLogEntity existing = entity("private");
+        AsyncTaskEntity done = pendingTask();
+        done.setStatus(TaskStatus.SUCCEEDED.getValue());
+        when(workLogMapper.selectOne(any())).thenReturn(existing);
+        when(taskService.find(USER_ID, TaskType.EXTRACT_MEMORY, existing.getId())).thenReturn(done);
+
+        WorkLogCommand keyed = new WorkLogCommand(null, "标题", null, null, null, Instant.now(),
+            List.of(), null, "same-key");
+
+        assertThat(service.create(owner, keyed).extraction()).isEqualTo(ExtractionState.SUCCEEDED);
+    }
+
+    private static AsyncTaskEntity pendingTask() {
+        AsyncTaskEntity task = new AsyncTaskEntity();
+        task.setId(UUID.randomUUID().toString());
+        task.setUserId(USER_ID.toString());
+        task.setTaskType(TaskType.EXTRACT_MEMORY.getValue());
+        task.setStatus(TaskStatus.PENDING.getValue());
+        return task;
     }
 
     private static WorkLogCommand command(String visibility, String workType) {

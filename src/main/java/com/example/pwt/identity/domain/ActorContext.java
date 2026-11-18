@@ -44,6 +44,20 @@ public record ActorContext(ActorType actorType, UUID userId, UUID agentClientId,
     }
 
     /**
+     * 构造系统主体上下文，供异步 Worker 与定时任务使用。
+     *
+     * <p>Worker 处理某个用户的任务时以此绑定上下文，多租户拦截器据此追加 {@code user_id} 条件，
+     * 使后台任务与请求线程一样受同一套隔离约束（设计文档 14.3），
+     * 而不是图省事把表加入免拦截白名单。
+     *
+     * @param userId 任务所属用户
+     * @return 上下文
+     */
+    public static ActorContext system(UUID userId) {
+        return new ActorContext(ActorType.SYSTEM, userId, null, Set.of());
+    }
+
+    /**
      * 判断是否为 Owner 会话。Owner 不受 scope 限制（设计文档 14.2）。
      *
      * @return true 表示 Owner
@@ -53,13 +67,27 @@ public record ActorContext(ActorType actorType, UUID userId, UUID agentClientId,
     }
 
     /**
+     * 判断是否为系统内部主体（异步 Worker、定时任务）。
+     *
+     * <p>系统主体不是用户会话，但它总是替某个具体用户处理其自有数据，
+     * 因此不受 scope 限制、也可读该用户的 {@code private} 数据；
+     * 它不得把数据提升为 {@code public}（见 {@link AccessPolicy#requireAssignable}），
+     * 对外发布权只属于 Owner。
+     *
+     * @return true 表示系统主体
+     */
+    public boolean isSystem() {
+        return actorType == ActorType.SYSTEM;
+    }
+
+    /**
      * 判断是否持有指定 scope。
      *
      * @param scope 所需 scope
      * @return true 表示已授予
      */
     public boolean hasScope(String scope) {
-        return isOwner() || scopes.contains(scope);
+        return isOwner() || isSystem() || scopes.contains(scope);
     }
 
     /**

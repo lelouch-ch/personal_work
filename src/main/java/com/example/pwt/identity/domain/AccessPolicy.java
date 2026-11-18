@@ -23,6 +23,11 @@ import com.example.pwt.common.error.ErrorCode;
  * <p>scope 与 visibility 是两个独立维度：scope 决定“该 Agent 能否碰这类资源”，
  * visibility 决定“该条数据允许给谁看”，两者都通过才可读。
  *
+ * <p>系统主体（异步 Worker、定时任务）按 Owner 同档处理读取：它替某个具体用户处理其自有数据，
+ * 提取候选记忆必须能读到该用户的 {@code private} 工作记录，否则「工作记录 → 候选记忆」闭环无法自动进行。
+ * 边界由另外两道机制保证，不放宽可见性语义：多租户拦截器把它的读写限制在同一个 {@code user_id}，
+ * 且它不得把数据提升为 {@code public}（ADR-024）。
+ *
  * @author pwt
  */
 public final class AccessPolicy {
@@ -58,7 +63,7 @@ public final class AccessPolicy {
         if (actor == null) {
             return false;
         }
-        if (actor.isOwner()) {
+        if (actor.isOwner() || actor.isSystem()) {
             return true;
         }
         return level == Visibility.AGENT;
@@ -84,6 +89,7 @@ public final class AccessPolicy {
     public static void requireAssignable(ActorContext actor, String visibility) {
         if (visibility != null && parse(visibility) == Visibility.PUBLIC
             && (actor == null || !actor.isOwner())) {
+            // 只有 Owner 会话可以对外发布：Agent 与系统主体都不行（设计文档 9.6、ADR-024）
             throw new BizException(ErrorCode.VALIDATION_ERROR, PUBLIC_ONLY_BY_OWNER);
         }
     }
@@ -95,7 +101,7 @@ public final class AccessPolicy {
      * @return 可拼入 WHERE 的条件
      */
     public static String visibilityCondition(ActorContext actor) {
-        if (actor != null && actor.isOwner()) {
+        if (actor != null && (actor.isOwner() || actor.isSystem())) {
             return NO_FILTER_SQL;
         }
         if (actor != null && actor.agentClientId() != null) {
