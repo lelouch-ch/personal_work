@@ -22,6 +22,9 @@
         <mybatis-plus.version>3.5.6</mybatis-plus.version>
         <jjwt.version>0.12.6</jjwt.version>
         <testcontainers.version>1.21.4</testcontainers.version>
+        <!-- MCP Java SDK：0.11.3 是含 Streamable HTTP（设计文档 9.1 的接入基线）
+             且仍为单 jar 的版本；字节码 major=61，与本项目 Java 17 一致 -->
+        <mcp.version>0.11.3</mcp.version>
     </properties>
 
     <dependencies>
@@ -36,6 +39,14 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- MCP Java SDK（设计文档 9.1）：只做 Agent 接入层的协议与传输，
+             业务逻辑与权限判定仍在各 application 服务里，MCP 侧不重复实现 -->
+        <dependency>
+            <groupId>io.modelcontextprotocol.sdk</groupId>
+            <artifactId>mcp</artifactId>
+            <version>${mcp.version}</version>
         </dependency>
 
         <!-- 认证与 Token 哈希：仅取 crypto，权限判定由业务层 scope 检查完成（设计文档 14.2） -->
