@@ -4,7 +4,7 @@
 
 ## 里程碑 6 - 2026-11-18 MCP Server（Agent 接入层）
 
-- 提交：待推送
+- 提交：`04823ab`
 - Added: `mcp` 模块——Streamable HTTP 传输挂到 `/mcp`、认证过滤器、六个 Tools、
   六个固定 Resources（含 9.2 的 `pwt://work/recent`）与按类型展开的模板资源；统一输出包装（设计文档 9.5）
 - Added: `identity/application/CredentialResolver`（从 REST 拦截器抽出，与 MCP 共用凭证判定）、
