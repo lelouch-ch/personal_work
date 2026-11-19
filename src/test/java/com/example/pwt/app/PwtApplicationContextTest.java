@@ -119,14 +119,25 @@ class PwtApplicationContextTest {
             "/api/v1/memories/{memoryId}/approve",
             "/api/v1/memories/{memoryId}/reject",
             "/api/v1/memories/{memoryId}/archive",
-            "/api/v1/memories/{memoryId}/supersede");
+            "/api/v1/memories/{memoryId}/supersede",
+            "/api/v1/context/build",
+            "/api/v1/context/memories/search",
+            "/api/v1/skills",
+            "/api/v1/skills/{skillId}",
+            "/api/v1/skills/{skillId}/publish",
+            "/api/v1/skills/{skillId}/archive",
+            "/api/v1/style-rules",
+            "/api/v1/style-rules/{ruleId}/approve",
+            "/api/v1/style-rules/{ruleId}/archive");
     }
 
     @Test
     void shouldRegisterWriteEndpointsWithPostOnly() {
         // 审核动作必须是 POST 且不能被 GET 覆盖，否则缓存与预取可能误触发状态迁移
         for (String path : List.of("/api/v1/memories/{memoryId}/approve", "/api/v1/memories/{memoryId}/reject",
-            "/api/v1/memories/{memoryId}/archive", "/api/v1/memories/{memoryId}/supersede")) {
+            "/api/v1/memories/{memoryId}/archive", "/api/v1/memories/{memoryId}/supersede",
+            "/api/v1/skills/{skillId}/publish", "/api/v1/skills/{skillId}/archive",
+            "/api/v1/style-rules/{ruleId}/approve", "/api/v1/style-rules/{ruleId}/archive")) {
             assertThat(handlerMapping.getHandlerMethods().keySet())
                 .as("%s 应只接受 POST", path)
                 .anySatisfy(info -> {

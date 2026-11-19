@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import java.math.BigDecimal;
+import java.time.Instant;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -49,4 +50,10 @@ public class StyleRuleEntity {
 
     /** 可见性：private / agent / public。 */
     private String visibility;
+
+    /** 创建时间。 */
+    private Instant createdAt;
+
+    /** 更新时间；本表由应用层显式赋值，不依赖 ON UPDATE 触发（设计文档 8.4）。 */
+    private Instant updatedAt;
 }

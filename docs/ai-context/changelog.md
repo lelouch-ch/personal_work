@@ -2,6 +2,44 @@
 
 里程碑级总结，最新在前。测试数与验证结论均来自实际运行，未跑过的不写。
 
+## 里程碑 7 - 2026-11-19 Skill 与工作风格
+
+- 提交：待填
+- Added: `skill` 模块（`SkillStatus` / `SkillSlug` / `SkillEntity` / `SkillMapper` /
+  `SkillService` / `SkillRecallService` / `SkillController` 与 DTO）；
+  接口 `GET|POST /api/v1/skills`、`GET|PUT /api/v1/skills/{id}`、
+  `POST /api/v1/skills/{id}/publish|archive`（后两个是 10.2 之外为承载“发布前审核”新增的动作）
+- Added: 工作风格规则维护与审核（`context/application/StyleRuleService`、
+  `context/controller/StyleRuleController`）：`GET|POST /api/v1/style-rules`、
+  `POST /api/v1/style-rules/{id}/approve|archive`
+- Added: MCP 第 7 个工具 `get_skills` 与第 13 个资源 `pwt://skills/list`（摘要形状，不含正文）；
+  `McpSchemas.uuidArray` / `McpArgs.uuidList`
+- Added: `ContextProperties.maxSkills`（`pwt.context.max-skills`，默认 3）与
+  `ContextDataReader.readSkills`；Context Builder 的 Skill 注入段（预算按条分配、装不下整条不装、
+  单条注入文本上限 2000 字符），`ContextPacket` 新增 `SECTION_SKILLS`，
+  访问记录写入 `skill_ids`
+- Added: `SkillServiceTest` 20 例、`SkillApiContractTest` 10 例，
+  `MysqlDdlMigrationTest` 新增 2 例（`ft_skill_text` 覆盖三列的中文命中、
+  同 slug 多版本可共存而同版本重复被拒），`ContextBuilderServiceTest` 新增 7 例 Skill 注入用例，
+  `McpToolCatalogTest` / `McpResourceCatalogTest` 同步到 7 工具 / 13 资源
+- Changed: 无迁移——`pt_skill`（V5）与 `pt_style_rule`（V6）自 M1 建库即在，本里程碑补写入方与读取方；
+  `ContextDataReader.load` 与 `Loaded` 增加 Skill 相关参数与字段（内部接口，调用方仅 Context Builder）
+- Docs: 根 `README.md` 增补 M7 章节、接口速览第 12/13 步、端到端记录与三条新限制；
+  `requirements.md` 新增「Skill 与工作风格」并把 MCP 段更新为 7 工具 / 全量资源；
+  `decisions.md` 补 ADR-028（版本切换用发布归档表达）、ADR-029（风格规则不设阈值）
+  与 ADR-009 的实现期补充
+- Verified: 2026-11-19 `mvn clean test`（带真实 MySQL 参数）**361 例全绿**（此前 322 例），
+  其中 `MysqlDdlMigrationTest` 20 例在 MySQL 9.3.0 通过
+- Verified: 真实端到端 32 项断言全通过（`personal_test` + 起真实实例 + MCP 协议往返）——
+  草稿/发布/改版产生 v2 草稿/重复发布 400/归档后不可见；Agent 按 ID 取正文、按中文关键词召回、
+  `query` 与 `skill_ids` 取交集；`pwt://skills/list` 只有摘要字段；`build_context` 注入 3 条并
+  把 ID 写入 `pt_context_access_log.skill_ids`；上万字长 Skill 在预算 500 下整条不装且
+  `truncated_sections=["skills"]`，而更短的其它流程照常装入；Agent 写 Skill 与风格规则均 403；缺 `skill:read` 两条入口
+  都拿到 `SCOPE_REQUIRED`；风格规则 candidate 不注入、批准后同时出现在资源与上下文
+- Not verified: 默认预算（4000）下 Skill 是否真能进入上下文——截断路径是用「长 Skill + 预算 500」
+  构造出来的，真实语料的记忆段几乎必然先吃满预算；Skill 召回质量未用真实语料评测；
+  风格规则尚无自动产出方，`source_count` 恒为 1
+
 ## 里程碑 6 - 2026-11-18 MCP Server（Agent 接入层）
 
 - 提交：`04823ab`

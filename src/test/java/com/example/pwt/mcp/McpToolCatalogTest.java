@@ -17,6 +17,7 @@ import com.example.pwt.memory.application.MemoryService;
 import com.example.pwt.memory.infrastructure.MemoryEntity;
 import com.example.pwt.profile.application.ProfileService;
 import com.example.pwt.profile.application.ResumeService;
+import com.example.pwt.skill.application.SkillRecallService;
 import com.example.pwt.profile.infrastructure.UserProfileEntity;
 import com.example.pwt.work.application.WorkLogCommand;
 import com.example.pwt.work.application.WorkLogCreation;
@@ -79,6 +80,9 @@ class McpToolCatalogTest {
     @Mock
     private ResumeService resumeService;
 
+    @Mock
+    private SkillRecallService skillRecallService;
+
     private final McpProperties properties = new McpProperties();
 
     private final UUID userId = UUID.randomUUID();
@@ -90,7 +94,7 @@ class McpToolCatalogTest {
     @BeforeEach
     void setUp() {
         catalog = new McpToolCatalog(workLogService, memoryService, contextSearchService,
-            contextBuilderService, profileService, resumeService, properties);
+            contextBuilderService, profileService, resumeService, skillRecallService, properties);
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.setAttribute(McpActorFilter.ATTRIBUTE_ACTOR,
             ActorContext.agent(userId, UUID.randomUUID(), Set.of(Scope.WORK_WRITE)));
@@ -108,11 +112,11 @@ class McpToolCatalogTest {
     }
 
     @Test
-    void shouldExposeExactlySixMvpToolsWithChineseDescriptions() {
+    void shouldExposeSevenMvpToolsWithChineseDescriptions() {
         List<String> names = catalog.tools().stream().map(spec -> spec.tool().name()).toList();
 
         assertThat(names).containsExactly("get_profile", "get_resume_url", "capture_work_log",
-            "propose_memory", "search_memories", "build_context");
+            "propose_memory", "search_memories", "build_context", "get_skills");
         // 描述是 Agent 唯一的选型依据，空描述等于让模型瞎猜
         assertThat(catalog.tools()).allSatisfy(spec -> {
             Tool tool = spec.tool();

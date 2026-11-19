@@ -7,6 +7,7 @@ import com.example.pwt.identity.application.CredentialResolver;
 import com.example.pwt.memory.application.MemoryService;
 import com.example.pwt.profile.application.ProfileService;
 import com.example.pwt.profile.application.ResumeService;
+import com.example.pwt.skill.application.SkillRecallService;
 import com.example.pwt.work.application.WorkLogService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.server.McpServer;
@@ -144,9 +145,10 @@ public class McpServerConfig {
                                          ContextSearchService contextSearchService,
                                          ContextBuilderService contextBuilderService,
                                          ProfileService profileService, ResumeService resumeService,
+                                         SkillRecallService skillRecallService,
                                          McpProperties properties) {
         return new McpToolCatalog(workLogService, memoryService, contextSearchService,
-            contextBuilderService, profileService, resumeService, properties);
+            contextBuilderService, profileService, resumeService, skillRecallService, properties);
     }
 
     /**
@@ -156,6 +158,7 @@ public class McpServerConfig {
      * @param resumeService          简历服务
      * @param governanceQueryService 约束与风格规则查询
      * @param memoryService          记忆服务
+     * @param skillRecallService     Skill 召回服务
      * @return 目录
      */
     @Bean
@@ -163,8 +166,9 @@ public class McpServerConfig {
                                                  ResumeService resumeService,
                                                  GovernanceQueryService governanceQueryService,
                                                  MemoryService memoryService,
-                                                 WorkLogService workLogService) {
+                                                 WorkLogService workLogService,
+                                                 SkillRecallService skillRecallService) {
         return new McpResourceCatalog(profileService, resumeService, governanceQueryService,
-            memoryService, workLogService);
+            memoryService, workLogService, skillRecallService);
     }
 }

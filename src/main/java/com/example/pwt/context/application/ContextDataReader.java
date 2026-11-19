@@ -2,6 +2,7 @@ package com.example.pwt.context.application;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.pwt.common.api.Scope;
+import com.example.pwt.context.ContextProperties;
 import com.example.pwt.context.domain.ContextQuery;
 import com.example.pwt.context.infrastructure.ConstraintEntity;
 import com.example.pwt.context.infrastructure.StyleRuleEntity;
@@ -14,6 +15,8 @@ import com.example.pwt.memory.infrastructure.MemoryEntity;
 import com.example.pwt.memory.infrastructure.MemoryEvidenceMapper;
 import com.example.pwt.profile.infrastructure.UserProfileEntity;
 import com.example.pwt.profile.infrastructure.UserProfileMapper;
+import com.example.pwt.skill.application.SkillRecallService;
+import com.example.pwt.skill.infrastructure.SkillEntity;
 import com.example.pwt.work.domain.ProjectStatus;
 import com.example.pwt.work.infrastructure.ProjectEntity;
 import com.example.pwt.work.infrastructure.ProjectMapper;
@@ -59,6 +62,10 @@ public class ContextDataReader {
 
     private final MemoryEvidenceMapper evidenceMapper;
 
+    private final SkillRecallService skillRecallService;
+
+    private final ContextProperties properties;
+
     /**
      * 构造装载器。
      *
@@ -67,15 +74,20 @@ public class ContextDataReader {
      * @param governanceQueryService 约束与风格规则查询（与 MCP Resources 共用）
      * @param memoryRecallService 记忆召回服务
      * @param evidenceMapper      记忆证据 Mapper，用于补出来源引用
+     * @param skillRecallService  Skill 召回服务，无 {@code skill:read} 时不会调用
+     * @param properties          预算与条数配额
      */
     public ContextDataReader(UserProfileMapper userProfileMapper, ProjectMapper projectMapper,
                              GovernanceQueryService governanceQueryService,
-                             MemoryRecallService memoryRecallService, MemoryEvidenceMapper evidenceMapper) {
+                             MemoryRecallService memoryRecallService, MemoryEvidenceMapper evidenceMapper,
+                             SkillRecallService skillRecallService, ContextProperties properties) {
         this.userProfileMapper = userProfileMapper;
         this.projectMapper = projectMapper;
         this.governanceQueryService = governanceQueryService;
         this.memoryRecallService = memoryRecallService;
         this.evidenceMapper = evidenceMapper;
+        this.skillRecallService = skillRecallService;
+        this.properties = properties;
     }
 
     /**
@@ -86,11 +98,12 @@ public class ContextDataReader {
      * @param projectId  项目，可为空
      * @param types      记忆类型白名单，为空表示不限
      * @param candidates 候选上限
+     * @param includeSkills 是否装载 Skill；为 false 时连查询都不发
      * @return 装载结果
      */
     @Transactional(readOnly = true)
     public Loaded load(ActorContext actor, ContextQuery query, UUID projectId, List<MemoryType> types,
-                       int candidates) {
+                       int candidates, boolean includeSkills) {
         Instant now = Instant.now();
         MemoryRecall recall = memoryRecallService.recall(actor, query, types,
             projectId == null ? null : projectId.toString(), candidates);
@@ -100,7 +113,8 @@ public class ContextDataReader {
             .map(memory -> toCandidate(memory, refs.get(UUID.fromString(memory.getId()))))
             .toList();
         return new Loaded(readProfile(actor), readProject(actor, projectId), readConstraints(actor),
-            readStyleRules(actor), items, recall.fullText(), now);
+            readStyleRules(actor), items, recall.fullText(),
+            readSkills(actor, query, includeSkills), now);
     }
 
     /**
@@ -112,10 +126,12 @@ public class ContextDataReader {
      * @param styleRules  已批准的风格规则
      * @param candidates  记忆候选，保持召回顺序
      * @param fullText    是否由全文检索命中；false 表示走了 {@code LIKE} 兜底
+     * @param skills      相关 Skill，已按相关度排好序；未授权或未开启时为空
      * @param now         基准时刻：新近度与有效期必须同源，两次取时跨分钟会得出互相矛盾的结果
      */
     public record Loaded(UserProfileEntity profile, ProjectEntity project, List<ConstraintEntity> constraints,
                          List<StyleRuleEntity> styleRules, List<ContextCandidate> candidates, boolean fullText,
+                         List<SkillEntity> skills,
                          Instant now) {
     }
 
@@ -168,6 +184,26 @@ public class ContextDataReader {
 
     private List<StyleRuleEntity> readStyleRules(ActorContext actor) {
         return governanceQueryService.approvedStyleRules(actor);
+    }
+
+    /**
+     * 装载相关 Skill。
+     *
+     * <p>无 {@code skill:read} 时返回空而不是抛异常，与 {@link #readProfile} 同一处理：
+     * {@code build_context} 的必需 scope 是 {@code context:build}，只授予它的 Agent
+     * 应当拿到「没有 Skill」的上下文，而不是整次构建失败（14.2 不得旁路授权）。
+     *
+     * @param actor         当前主体
+     * @param query         已组装的检索串，与记忆段共用一份，避免二次解析产生分歧
+     * @param includeSkills 调用方是否要求包含 Skill
+     * @return 可见的已发布 Skill，未授权或未开启时为空
+     */
+    private List<SkillEntity> readSkills(ActorContext actor, ContextQuery query, boolean includeSkills) {
+        if (!includeSkills || !actor.hasScope(Scope.SKILL_READ)) {
+            return List.of();
+        }
+        // 上下文注入按任务相关性取，不做 ID 过滤：调用方没理由知道该带哪几条
+        return skillRecallService.recall(actor, query, null, properties.getMaxSkills()).candidates();
     }
 
     private Map<UUID, List<UUID>> sourceRefs(List<MemoryEntity> memories) {

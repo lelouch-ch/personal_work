@@ -10,6 +10,7 @@ import com.example.pwt.common.util.Uuids;
 import com.example.pwt.common.web.RequestContext;
 import com.example.pwt.context.ContextProperties;
 import com.example.pwt.context.domain.ContextQuery;
+import com.example.pwt.context.domain.ContextWeights;
 import com.example.pwt.context.infrastructure.ConstraintEntity;
 import com.example.pwt.context.infrastructure.ContextAccessLogEntity;
 import com.example.pwt.context.infrastructure.ContextAccessLogMapper;
@@ -18,11 +19,14 @@ import com.example.pwt.identity.domain.ActorContext;
 import com.example.pwt.memory.domain.MemoryType;
 import com.example.pwt.memory.infrastructure.MemoryMapper;
 import com.example.pwt.profile.infrastructure.UserProfileEntity;
+import com.example.pwt.skill.infrastructure.SkillEntity;
 import com.example.pwt.work.infrastructure.ProjectEntity;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,6 +62,9 @@ public class ContextBuilderService {
 
     /** 一条注入项的结构开销估算（键名、引用 ID、分隔符），与 {@link ContextComposer} 同口径。 */
     private static final int ITEM_OVERHEAD_TOKENS = 16;
+
+    /** 单条 Skill 注入文本的长度上限，比记忆的 600 宽：流程步骤被截断比少装一条更糟。 */
+    private static final int MAX_SKILL_INJECT_CHARS = 2000;
 
     /**
      * 不可信内容的边界标记（设计文档 15.2）。
@@ -119,7 +126,7 @@ public class ContextBuilderService {
 
         ContextQuery query = ContextQuery.parse(normalizedTask);
         ContextDataReader.Loaded loaded = dataReader.load(actor, query, projectId, types,
-            properties.getMaxCandidates());
+            properties.getMaxCandidates(), !Boolean.FALSE.equals(includeSkills));
 
         List<String> truncatedSections = new ArrayList<>();
         // 按 11.5 的优先级顺序逐段扣预算：画像与项目背景先扣且不会被丢（它们小且是理解
@@ -165,18 +172,59 @@ public class ContextBuilderService {
         if (result.truncated()) {
             truncatedSections.add(ContextPacket.Meta.SECTION_MEMORIES);
         }
+        spent += result.tokensUsed();
+
+        // Skill 排在记忆段之后（11.5 第 5 优先级）：它是「补充怎么做」，而记忆是
+        // 「用户是谁、要什么」，预算冲突时先保后者。按条装、装不下就不装而不是截半段：
+        // Markdown 流程被截断之后，剩下半截读起来会误导 Agent 以为那就是完整步骤。
+        // 显式按分数倒序，而不是依赖召回 SQL 的 ORDER BY：预算是按顺序依次给的，
+        // 谁先拿到预算决定了预算不足时舍掉谁，这个取舍必须由本方法自己保证（与记忆段同理）
+        List<SkillEntity> skillCandidates = new ArrayList<>(loaded.skills());
+        skillCandidates.sort(Comparator.comparing(SkillEntity::getRelevance,
+            Comparator.nullsLast(Comparator.reverseOrder())));
+        double skillMaxRelevance = skillCandidates.stream()
+            .map(SkillEntity::getRelevance)
+            .filter(Objects::nonNull)
+            .mapToDouble(Double::doubleValue)
+            .max()
+            .orElse(0.0D);
+        List<ContextPacket.Item> skills = new ArrayList<>();
+        boolean skillSkipped = false;
+        for (SkillEntity skill : skillCandidates) {
+            String text = skillInjectText(skill);
+            int cost = TokenEstimator.estimate(text) + ITEM_OVERHEAD_TOKENS;
+            if (spent + cost > budget) {
+                // 跳过而不是停在此处：最相关的那条流程往往最长，它放不下不应连带清空
+                // 后面本来装得下的短流程（与记忆段同一教训，见 M5）
+                skillSkipped = true;
+                continue;
+            }
+            spent += cost;
+            // 分数口径与记忆段一致：按候选集最大值归一，兜底路径记固定低分（11.4）
+            double normalized = loaded.fullText() && skillMaxRelevance > 0.0D
+                && skill.getRelevance() != null
+                ? skill.getRelevance() / skillMaxRelevance
+                : ContextWeights.likeFallbackRelevance();
+            skills.add(new ContextPacket.Item(UUID.fromString(skill.getId()), "skill", text,
+                null, normalized, List.of(), null));
+        }
+        if (skillSkipped) {
+            truncatedSections.add(ContextPacket.Meta.SECTION_SKILLS);
+        }
 
         List<UUID> injected = new ArrayList<>();
         result.items().forEach(item -> injected.add(item.id()));
-        int tokenEstimate = spent + result.tokensUsed();
+        List<UUID> injectedSkills = new ArrayList<>();
+        skills.forEach(item -> injectedSkills.add(item.id()));
+        int tokenEstimate = spent;
         ContextPacket packet = new ContextPacket(profile, constraints, styleRules, result.items(),
-            List.of(), project,
+            skills, project,
             new ContextPacket.Meta(loaded.candidates().size(), result.items().size(), budget, tokenEstimate,
                 loaded.fullText() ? ContextPacket.Meta.PATH_FULL_TEXT : ContextPacket.Meta.PATH_LIKE,
                 List.copyOf(truncatedSections), Map.copyOf(result.droppedByQuota())),
             Boolean.FALSE.equals(includeSkills) ? null : BOUNDARY_MARKER);
 
-        recordAccess(actor, normalizedTask, projectId, packet, injected);
+        recordAccess(actor, normalizedTask, projectId, packet, injected, injectedSkills);
         touchUsage(injected);
         log.info("上下文构建完成 userId={} 候选={} 注入={} 预算={} 估算={} 路径={}",
             actor.userId(), loaded.candidates().size(), result.items().size(), budget, tokenEstimate,
@@ -288,8 +336,21 @@ public class ContextBuilderService {
         };
     }
 
+    /**
+     * 写上下文访问日志与审计（设计文档 11.3 第 9 步、15.3）。
+     *
+     * <p>{@code skill_ids} 与 {@code memory_ids} 分开记：11.3 与 19.4 都要求能追溯
+     * 「本次返回了哪些记忆和 Skill」，合成一列就没法按类型回放。
+     *
+     * @param actor         当前主体
+     * @param task          任务描述
+     * @param projectId     项目，可为空
+     * @param packet        已构建的上下文包
+     * @param injected      注入的记忆 ID
+     * @param injectedSkills 注入的 Skill ID
+     */
     private void recordAccess(ActorContext actor, String task, UUID projectId, ContextPacket packet,
-                              List<UUID> injected) {
+                              List<UUID> injected, List<UUID> injectedSkills) {
         ContextAccessLogEntity entity = new ContextAccessLogEntity();
         entity.setId(Uuids.randomUuidv7String());
         entity.setUserId(actor.userId().toString());
@@ -298,7 +359,7 @@ public class ContextBuilderService {
         entity.setRequestId(RequestContext.requestId());
         entity.setTaskSummary(truncate(task, TASK_SUMMARY_COLUMN));
         entity.setMemoryIds(injected.stream().map(UUID::toString).toList());
-        entity.setSkillIds(List.of());
+        entity.setSkillIds(injectedSkills.stream().map(UUID::toString).toList());
         entity.setTokenBudget(packet.meta().tokenBudget());
         entity.setTokenEstimate(packet.meta().tokenEstimate());
         entity.setCreatedAt(Instant.now());
@@ -333,5 +394,25 @@ public class ContextBuilderService {
             return null;
         }
         return value.length() <= maxChars ? value : value.substring(0, maxChars);
+    }
+
+    /**
+     * Skill 的注入文本：名称 + 说明 + 正文，超长时截断并加省略号。
+     *
+     * <p>带上名称与说明而不是只给正文：Agent 需要先知道「这是做什么用的流程」，
+     * 才能判断要不要照着执行，否则一段没有标题的 Markdown 很容易被当成普通参考文本。
+     *
+     * @param skill Skill
+     * @return 注入文本
+     */
+    private String skillInjectText(SkillEntity skill) {
+        StringBuilder text = new StringBuilder(skill.getName());
+        if (skill.getDescription() != null && !skill.getDescription().isBlank()) {
+            text.append('：').append(skill.getDescription().strip());
+        }
+        if (skill.getContentMd() != null && !skill.getContentMd().isBlank()) {
+            text.append('\n').append(skill.getContentMd().strip());
+        }
+        return truncate(text.toString(), MAX_SKILL_INJECT_CHARS);
     }
 }

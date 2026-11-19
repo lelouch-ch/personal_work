@@ -97,6 +97,28 @@ final class McpSchemas {
     }
 
     /**
+     * UUID 数组字段，用于 9.4 的 {@code skill_ids}。
+     *
+     * <p>刻意不复用 {@link #stringArray}：那个方法的元素是自由文本（标签、类型名），
+     * 而这里必须带 {@code format: uuid}，否则客户端会把标题之类的字符串塞进来，
+     * 到服务端才失败一次。
+     *
+     * @param description 说明
+     * @param maxItems    元素个数上限，可为空表示不限
+     * @return 字段描述
+     */
+    static Map<String, Object> uuidArray(String description, Integer maxItems) {
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "array");
+        schema.put("description", description);
+        schema.put("items", Map.of("type", "string", "format", "uuid"));
+        if (maxItems != null) {
+            schema.put("maxItems", maxItems);
+        }
+        return schema;
+    }
+
+    /**
      * 整数字段。
      *
      * @param description 说明

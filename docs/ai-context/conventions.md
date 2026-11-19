@@ -68,6 +68,13 @@
   MCP 走 SDK 的处理线程，与进入 Servlet 的线程不同，必须每调用绑定一次（`McpInvocation`）。
 - **MCP 的模板资源要展开成具体 URI 注册。** SDK 的 `resources/read` 只按已注册资源的 URI
   匹配，`resources/templates/list` 的清单是纯展示，只登记清单会让客户端能列出却读不到。
+- **“审核 / 发布”必须有独立的动作接口，不能被创建参数绕过。** 记忆审核、Skill 发布、
+  风格规则批准都是如此：若允许创建时直接写 `status=published`（或 `approved`），
+  审核这一环形同虚设，且 Agent 正在使用的内容会被就地改写。取值校验一律放在服务层，
+  REST 与 MCP 两条入口共用同一个服务方法，保证判定完全一致。
+- **列举型响应不要带 `mediumtext` 正文。** `content_md` 这类长字段只在按 ID 取用时返回，
+  列表与资源给摘要形状（先例：`SkillSummary` 与 `pwt://skills/list`），否则调用方
+  光是传输就要花掉上下文预算。
 
 ## 测试
 

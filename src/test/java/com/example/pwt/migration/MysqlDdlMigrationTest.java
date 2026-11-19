@@ -521,6 +521,106 @@ class MysqlDdlMigrationTest {
     }
 
     /**
+     * 校验 Skill 的中文全文检索可用（V5 的 {@code ft_skill_text} 带 ngram 解析器）。
+     *
+     * <p>Context Builder 与 {@code get_skills} 都按 name / description / content_md 三列召回，
+     * 少配一个列或漏掉 ngram 解析器都不会报错，只会让中文召回静默为 0，
+     * 表现为「Agent 说没有相关技能」，因此必须在真实库上断言命中。
+     *
+     * @throws SQLException 数据库访问失败
+     */
+    @Test
+    void shouldSearchSkillChineseWithNgramParser() throws SQLException {
+        String userId = insertUser("skill-fts");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.executeUpdate(skillSql(userId, "灰度发布流程", "按批次放量并观察指标", "published",
+                "第一步 回滚 检查 指标"));
+            statement.executeUpdate(skillSql(userId, "会议纪要整理", "从录音转写提取结论", "draft",
+                "第二步 归档 纪要"));
+
+            // MATCH 的列集合必须与 ft_skill_text 的定义完全一致，单列会报“找不到索引”。
+            // 分别用只出现在某一列的词，证明三列都真进了索引：漏掉 name 会让
+            // 「按名字找技能」静默召回 0，而这在只看正文的用例里发现不了。
+            assertThat(countSkillMatch(statement, userId, "灰度 发布")).as("标题中文应命中").isEqualTo(1);
+            assertThat(countSkillMatch(statement, userId, "放量 观察")).as("说明中文应命中").isEqualTo(1);
+            assertThat(countSkillMatch(statement, userId, "回滚 检查")).as("正文中文应命中").isEqualTo(1);
+        }
+    }
+
+    /**
+     * 校验 Skill 的版本唯一键与状态约束（设计文档 8.3 的 {@code uq_skill_user_slug_version}）。
+     *
+     * <p>同一 slug 允许多版本并存、但同一版本只能有一条：这是「已发布内容不被就地改写」
+     * 这条版本语义的最后防线，只靠服务层判断的话并发写入会静默产生两条同版本记录。
+     *
+     * @throws SQLException 数据库访问失败
+     */
+    @Test
+    void shouldAllowMultipleVersionsButRejectSameVersion() throws SQLException {
+        String userId = insertUser("skill-version");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO pt_skill (id, user_id, name, slug, content_md, version, status)"
+                + " VALUES ('" + UUID.randomUUID() + "', '" + userId + "', '同一技能 v1', 'same-slug',"
+                + " '# 步骤', 1, 'published')");
+            statement.executeUpdate("INSERT INTO pt_skill (id, user_id, name, slug, content_md, version, status)"
+                + " VALUES ('" + UUID.randomUUID() + "', '" + userId + "', '同一技能 v2', 'same-slug',"
+                + " '# 新步骤', 2, 'draft')");
+
+            try (ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM pt_skill WHERE user_id = '" + userId
+                + "' AND slug = 'same-slug'")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).as("同一 slug 的多版本应可共存").isEqualTo(2);
+            }
+            assertThatThrownBy(() -> statement.executeUpdate(
+                "INSERT INTO pt_skill (id, user_id, name, slug, content_md, version, status) VALUES ('"
+                    + UUID.randomUUID() + "', '" + userId + "', '重复版本', 'same-slug', '# 又一份', 2, 'draft')"))
+                .as("同一 slug 的同一版本必须被唯一键拒绝")
+                .isInstanceOf(SQLException.class);
+
+            assertThatThrownBy(() -> statement.executeUpdate(
+                "INSERT INTO pt_skill (id, user_id, name, slug, content_md, version, status) VALUES ('"
+                    + UUID.randomUUID() + "', '" + userId + "', '非法状态', 'bad-status', '# 内容', 1, 'ship')"))
+                .as("status 的 CHECK 只允许 draft / published / archived")
+                .isInstanceOf(SQLException.class);
+        }
+    }
+
+    /**
+     * 统计 Skill 全文检索命中数。
+     *
+     * @param statement 语句对象
+     * @param userId    用户过滤条件
+     * @param phrase 已组装的布尔模式检索串
+     * @return 命中行数
+     * @throws SQLException 数据库访问失败
+     */
+    private static int countSkillMatch(Statement statement, String userId, String phrase) throws SQLException {
+        try (ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM pt_skill WHERE user_id = '" + userId
+            + "' AND MATCH(name, description, content_md) AGAINST('" + phrase + "' IN BOOLEAN MODE)")) {
+            assertThat(rs.next()).isTrue();
+            return rs.getInt(1);
+        }
+    }
+
+    /**
+     * 组装 Skill 插入语句，三列都带中文以便逐列验证全文索引。
+     *
+     * @param userId      所属用户
+     * @param name        名称
+     * @param description 说明
+     * @param status      状态
+     * @param contentMd   正文
+     * @return INSERT 语句
+     */
+    private static String skillSql(String userId, String name, String description, String status,
+                                   String contentMd) {
+        return "INSERT INTO pt_skill (id, user_id, name, slug, description, content_md, version, status)"
+            + " VALUES ('" + UUID.randomUUID() + "', '" + userId + "', '" + name + "', 'slug-"
+            + UUID.randomUUID().toString().substring(0, 8) + "', '" + description + "', '" + contentMd
+            + "', 1, '" + status + "')";
+    }
+
+    /**
      * 创建本轮测试专用的最小用户记录。
      *
      * @param label 用例标识，用于生成不冲突的登录名

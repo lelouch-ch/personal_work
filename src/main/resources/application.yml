@@ -88,6 +88,9 @@ pwt:
     min-token-budget: ${PWT_CONTEXT_MIN_TOKEN_BUDGET:500}
     max-token-budget: ${PWT_CONTEXT_MAX_TOKEN_BUDGET:20000}
     max-candidates: ${PWT_CONTEXT_MAX_CANDIDATES:60}
+    # 每次构建最多注入几条 Skill（设计文档 11.5 第 7 项）：正文是 Markdown 流程，
+    # 单条就可能上千字，因此排在相关记忆之后且装不下整条就不装。
+    max-skills: ${PWT_CONTEXT_MAX_SKILLS:3}
     type-quotas:
       - type: fact
         limit: 4

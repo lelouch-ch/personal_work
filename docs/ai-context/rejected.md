@@ -113,3 +113,6 @@
   最高分那条往往最长（没写摘要时注入正文），它一超预算就把整段清空，
   Agent 明明还有预算可用却空手而归。修正后同场景注入 5 条。
 - Revisit if: 上下文段之间改为严格互斥的分池预算，此时“本池满即停”才重新合理。
+  M7 实现 Skill 段时又按“本条放不下即停”写过一版，端到端才暴露同一问题：
+  最相关的长流程一超预算就把后面装得下的短流程全部带走，已改回跳过继续装
+  （`ContextBuilderServiceTest.shouldKeepSmallerSkillsWhenTheTopOneDoesNotFit` 锁死）。

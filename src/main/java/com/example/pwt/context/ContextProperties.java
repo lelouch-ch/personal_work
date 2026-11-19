@@ -33,6 +33,15 @@ public class ContextProperties {
     private int maxCandidates = 60;
 
     /**
+     * 单次上下文构建最多注入的 Skill 条数（11.5 第 5 优先级）。
+     *
+     * <p>刻意不给 Skill 单独的预算配额而是只限条数：Skill 正文是 Markdown 流程，
+     * 单条就能有上千 token，按预算切会把流程从中间截断成读不懂的半截；
+     * 按条数封顶、装不下就不装，宁可少给一条完整流程。
+     */
+    private int maxSkills = 3;
+
+    /**
      * 各记忆类型在“相关记忆”段内的配额，按类型顺序生效（11.5 第 3～6 优先级）。
      *
      * <p>配额存在的意义是防止一类记忆吃满预算：经验类通常条数最多、句子最长，

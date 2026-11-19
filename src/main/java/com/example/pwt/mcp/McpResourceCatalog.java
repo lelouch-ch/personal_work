@@ -13,6 +13,8 @@ import com.example.pwt.profile.application.ProfileService;
 import com.example.pwt.profile.application.ResumeService;
 import com.example.pwt.profile.controller.dto.ProfileResponse;
 import com.example.pwt.profile.controller.dto.ResumeResponse;
+import com.example.pwt.skill.application.SkillRecallService;
+import com.example.pwt.skill.controller.dto.SkillSummary;
 import com.example.pwt.work.application.WorkLogService;
 import com.example.pwt.work.controller.dto.WorkLogResponse;
 import com.example.pwt.work.infrastructure.WorkLogEntity;
@@ -57,6 +59,9 @@ public class McpResourceCatalog {
     /** 最近工作记录资源的返回条数。 */
     private static final int RECENT_WORK_LOG_SIZE = 20;
 
+    /** 已发布 Skill 列表资源的返回条数。 */
+    private static final int SKILL_LIST_SIZE = 20;
+
     private final ProfileService profileService;
 
     private final ResumeService resumeService;
@@ -67,6 +72,8 @@ public class McpResourceCatalog {
 
     private final WorkLogService workLogService;
 
+    private final SkillRecallService skillRecallService;
+
     /**
      * 构造目录。
      *
@@ -75,15 +82,17 @@ public class McpResourceCatalog {
      * @param governanceQueryService 约束与风格规则查询
      * @param memoryService          记忆服务
      * @param workLogService         工作记录服务
+     * @param skillRecallService     Skill 召回服务
      */
     public McpResourceCatalog(ProfileService profileService, ResumeService resumeService,
                               GovernanceQueryService governanceQueryService, MemoryService memoryService,
-                              WorkLogService workLogService) {
+                              WorkLogService workLogService, SkillRecallService skillRecallService) {
         this.profileService = profileService;
         this.resumeService = resumeService;
         this.governanceQueryService = governanceQueryService;
         this.memoryService = memoryService;
         this.workLogService = workLogService;
+        this.skillRecallService = skillRecallService;
     }
 
     /**
@@ -119,6 +128,12 @@ public class McpResourceCatalog {
                 return PageResult.of(page.items().stream().map(WorkLogResponse::from).toList(),
                     page.page(), page.size(), page.total());
             });
+        // 9.2 表里最后一个资源：只给摘要，正文按 ID 走 get_skills（见 SkillSummary 的理由）
+        put(map, "pwt://skills/list", "已发布 Skill 列表",
+            "已发布且授权可见的 Skill 摘要（最多 " + SKILL_LIST_SIZE + " 条），不含正文。"
+                + "要照着步骤执行请用 get_skills 取完整 Markdown。需要 skill:read。",
+            () -> skillRecallService.listPublished(scope(Scope.SKILL_READ), null, SKILL_LIST_SIZE)
+                .stream().map(SkillSummary::from).toList());
         // 模板展开成具体资源：客户端列一次就能拿到全部可读 URI，不必猜类型段
         for (MemoryType type : MemoryType.values()) {
             String memoryType = type.getValue();

@@ -62,15 +62,44 @@
 - Requirement: 针对具体任务返回少量、相关、可信、有效且授权可见的个人上下文，并受 Token 预算约束。
 - Acceptance criteria:
   - 返回内容不含 candidate / rejected / archived / superseded 记忆，也不含过期或不在有效期内的记忆
-  - 约束与风格规则在预算紧张时仍被注入；预算不足只削减相关记忆段，并在结果里标明被截断的段
+  - 约束与风格规则在预算紧张时仍被注入；预算不足先削减相关记忆段，再削减 Skill 段，
+    并在结果里标明被截断的段
   - 指定项目时，属于其它项目的记忆被排除，而项目未知的记忆仍保留
   - 中文短语走全文检索；单字查询降级为子串匹配，且结果里标明走了哪条召回路径
   - 同一件事的两种说法不会同时占预算；同一主题的两条不同事实不会被误合并
   - 每次构建写入一条访问记录（数据所有者、项目、注入的记忆 ID、预算与估算），并落审计
   - 被注入记忆的使用信号以一条批量更新回写，不逐行写，且失败不影响本次结果返回
   - `token_budget` 超出允许区间返回 400 且提示为中文
-- Constraints: Token 估算是字符分档的保守上界而非模型 tokenizer；`skills` 段恒为空数组，待 M7
+- Constraints: Token 估算是字符分档的保守上界而非模型 tokenizer；Skill 段排在相关记忆之后，
+  默认预算下很可能一条都装不下（见 [changelog](changelog.md) 里程碑 7 的未验证项）
 - Open questions: 权重与配额是否需要按用户/模型差异化；召回质量尚未用真实语料评测
+
+## Skill 与工作风格
+
+- Status: implemented
+- Requirement: Owner 维护可复用的工作方法（Skill）与工作风格规则，Agent 按授权读取，
+  并把它们作为上下文的一部分交给执行任务的 Agent。
+- Acceptance criteria:
+  - Skill 的新建与草稿修改只有 Owner 能做，Agent 调用返回 403；新建后是 `draft`、`version = 1`、
+    可见性缺省 `private`
+  - 草稿可原地修改；对已发布的 Skill 再修改不会产生新内容覆盖，而是返回同 slug 的
+    `version + 1` 草稿，原已发布行内容不变
+  - 发布是显式动作：发布后同一 slug 的其它已发布版本自动归档，同一 slug 最多一条生效；
+    重复发布已发布版本、发布已归档版本都返回 400 而不是静默通过
+  - 归档后的 Skill 不再出现在任何 Agent 读取路径与上下文注入中；归档动作幂等
+  - 同一 `(用户, slug, version)` 不可重复；slug 只允许小写字母、数字与连字符且以字母数字起止，
+    非法值（含纯中文）返回 400，大小写与连续连字符会被归一
+  - Agent 读 Skill 需要 `skill:read`；草稿对 Agent 按不存在处理；`public` 的 Skill 不能由 Agent 写入
+  - `pwt://skills/list` 只返回摘要（不含 Markdown 正文），`get_skills` 返回完整正文；
+    `get_skills` 同时给出关键词与 ID 白名单时取交集，白名单里失效的 ID 静默跳过
+  - 风格规则新建后是 `candidate`，经 Owner 批准（`approved`）才会出现在
+    `pwt://profile/style` 与上下文的风格段；归档的规则不再参与；同一用户内规则键唯一
+  - 上下文注入 Skill 时按条给预算，装不下整条就不装并在 `truncated_sections` 标明 `skills`；
+    `include_skills=false` 时该段与边界标记一并省略
+  - 每次构建把实际注入的 Skill ID 写入访问记录的 `skill_ids`，与记忆 ID 分列存放
+- Constraints: 版本切换靠「发布时归档同 slug 旧版本」而不是独立的主版本标记列；
+  风格规则不设自动批准阈值（没有自动产出方，全部由 Owner 手写）
+- Open questions: 是否给 Skill 段预留最低预算以保证它实际生效；风格规则是否要从工作记录自动归纳
 
 ## Agent 接入（MCP）
 
@@ -80,16 +109,15 @@
   - 未认证请求返回 401 且响应体是统一错误结构；撤销后的 Key 立即失效
   - `initialize` 返回服务信息、capabilities 与中文 instructions，并下发会话标识；
     后续请求必须携带该会话标识
-  - 六个工具可用：`get_profile`、`get_resume_url`、`capture_work_log`、`propose_memory`、
-    `search_memories`、`build_context`；写工具真实落库并触发既有的提取任务与审计链路
+  - 七个工具可用：`get_profile`、`get_resume_url`、`capture_work_log`、`propose_memory`、
+    `search_memories`、`build_context`、`get_skills`；写工具真实落库并触发既有的提取任务与审计链路
   - 工具输出是统一包装（`ok` / `data` / `meta.request_id` / `error`）放在 text content 里，
     字段语义与 REST 一致，时间为 ISO-8601
   - 缺必填参数返回 `isError=true` + `VALIDATION_ERROR` 且点名具体字段；scope 不足返回
     `SCOPE_REQUIRED` 并说明缺哪个 scope；两者都不是协议层异常
   - 写工具的可见性入参不接受 `public`
-  - 设计文档 9.2 表中的资源除 `pwt://skills/list`（属 M7）外全部提供：
-    `profile/identity`、`profile/resume`、`profile/style`、`profile/constraints`、
-    `memory/approved`、`work/recent`
+  - 设计文档 9.2 表中的资源全部提供：`profile/identity`、`profile/resume`、`profile/style`、
+    `profile/constraints`、`memory/approved`、`work/recent`、`skills/list`
   - `resources/list` 里的每个 URI 都必须能被 `resources/read` 读到；
     模板 `pwt://memory/approved/{memory_type}` 的六种类型逐个可读
   - 资源的可见性与 scope 判定与 REST 走同一套服务层规则，不因入口不同而放宽
@@ -101,7 +129,6 @@
 
 ## 尚未成为需求的部分
 
-- Skill 与工作风格（M7）、周报 / 学习建议 / 趋势分析（M8）、
-  生产化与数据生命周期（M9）：规格在设计文档，实现未开始，
+- 周报 / 学习建议 / 趋势分析（M8）、生产化与数据生命周期（M9）：规格在设计文档，实现未开始，
   此处不预先写成需求以免与实现脱节。
 - 审计记录查询接口：只有写入侧，读取接口待 M9。

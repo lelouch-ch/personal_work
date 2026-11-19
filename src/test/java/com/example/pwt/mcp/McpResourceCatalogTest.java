@@ -19,6 +19,7 @@ import com.example.pwt.memory.domain.MemoryStatus;
 import com.example.pwt.memory.domain.MemoryType;
 import com.example.pwt.profile.application.ProfileService;
 import com.example.pwt.profile.application.ResumeService;
+import com.example.pwt.skill.application.SkillRecallService;
 import com.example.pwt.work.application.WorkLogService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -70,6 +71,9 @@ class McpResourceCatalogTest {
     @Mock
     private WorkLogService workLogService;
 
+    @Mock
+    private SkillRecallService skillRecallService;
+
     private final UUID userId = UUID.randomUUID();
 
     private McpResourceCatalog catalog;
@@ -77,7 +81,7 @@ class McpResourceCatalogTest {
     @BeforeEach
     void setUp() {
         catalog = new McpResourceCatalog(profileService, resumeService, governanceQueryService,
-            memoryService, workLogService);
+            memoryService, workLogService, skillRecallService);
     }
 
     @AfterEach
@@ -86,12 +90,12 @@ class McpResourceCatalogTest {
     }
 
     @Test
-    void shouldRegisterSixFixedResourcesPlusSixTemplatedOnes() {
+    void shouldRegisterSevenFixedResourcesPlusSixTemplatedOnes() {
         Map<String, SyncResourceSpecification> resources = catalog.resources();
 
         assertThat(resources).containsOnlyKeys("pwt://profile/identity", "pwt://profile/resume",
             "pwt://profile/style", "pwt://profile/constraints", "pwt://memory/approved",
-            "pwt://work/recent",
+            "pwt://work/recent", "pwt://skills/list",
             "pwt://memory/approved/fact", "pwt://memory/approved/preference",
             "pwt://memory/approved/experience", "pwt://memory/approved/decision",
             "pwt://memory/approved/constraint", "pwt://memory/approved/goal");
@@ -181,7 +185,8 @@ class McpResourceCatalogTest {
     }
 
     private JsonNode read(String uri) throws Exception {
-        return readWithScopes(uri, Scope.PROFILE_READ, Scope.MEMORY_READ, Scope.WORK_READ);
+        return readWithScopes(uri, Scope.PROFILE_READ, Scope.MEMORY_READ, Scope.WORK_READ,
+            Scope.SKILL_READ);
     }
 
     private JsonNode readWithScopes(String uri, String... scopes) throws Exception {

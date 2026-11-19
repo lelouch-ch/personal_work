@@ -215,6 +215,42 @@ record McpArgs(Map<String, Object> values) {
     }
 
     /**
+     * UUID 数组。
+     *
+     * <p>与 {@link #stringList} 分开：标签里的脏值丢掉即可，而 ID 丢了会让调用方
+     * 以为「按这批 ID 查」实际只查了其中几条，因此格式非法必须报错点名。
+     *
+     * @param name     字段名
+     * @param maxItems 元素个数上限，可为空表示不限
+     * @return ID 列表，未提供时为空列表
+     * @throws BizException 传入的不是数组、元素不是 UUID 或数量超限
+     */
+    List<UUID> uuidList(String name, Integer maxItems) {
+        Object raw = values.get(name);
+        if (raw == null) {
+            return List.of();
+        }
+        if (!(raw instanceof List<?> list)) {
+            throw invalid(name, "需为 UUID 数组", null);
+        }
+        if (maxItems != null && list.size() > maxItems) {
+            throw invalid(name, "数量不能超过 " + maxItems, null);
+        }
+        List<UUID> result = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (item == null || String.valueOf(item).isBlank()) {
+                continue;
+            }
+            try {
+                result.add(UUID.fromString(String.valueOf(item).strip()));
+            } catch (IllegalArgumentException e) {
+                throw invalid(name, "元素需为 UUID", e);
+            }
+        }
+        return result;
+    }
+
+    /**
      * 选填布尔。
      *
      * @param name 字段名

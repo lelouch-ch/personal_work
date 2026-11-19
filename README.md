@@ -4,11 +4,11 @@
 v1.0 为 PostgreSQL 历史版本。
 
 当前进度：**M1 身份体系 + M2 Profile/Resume/Project + M3 Work Log + M4 Memory Engine +
-M5 Context Builder + M6 MCP Server 已完成**，M7 Skill 与 M8 报告待做
+M5 Context Builder + M6 MCP Server + M7 Skill 与工作风格 已完成**，M8 报告待做
 （Spring Boot 3.2.2 + MyBatis-Plus + MySQL + Flyway），已在 `192.168.124.108`（MySQL 9.3.0）
 完成建库、迁移与端到端验证。
 
-测试：`mvn clean test` 322 个用例全绿（含指定数据库后端时的 18 个 DDL 用例，见「构建与测试」）。
+测试：`mvn clean test` 361 个用例全绿（含指定数据库后端时的 20 个 DDL 用例，见「构建与测试」）。
 
 ## 环境要求
 
@@ -180,7 +180,28 @@ MCP 的报文较啰嗦，实际接入建议直接用 MCP 客户端 SDK。手工�
 `[Text.Encoding]::UTF8.GetBytes($json)` 传体，并按 SSE 逐行取 `data:`；
 `resources/read` 失败时 MCP SDK 0.11.3 会返回空响应体（见「已知限制」）。
 
-步骤 1–11 已全部实测通过（见「已验证」）。PowerShell 传 JSON 请求体时建议写入文件后用
+M7 新增的 Skill 与风格规则（Owner 侧维护，Agent 侧只读）：
+
+```powershell
+# 12. 建 Skill（草稿）→ 发布；已发布内容再改会返回 version+1 的新草稿，归档后不再参与检索
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/skills `
+  -Headers @{ Authorization = "Bearer $jwt" } -ContentType 'application/json; charset=utf-8' `
+  -Body '{"slug":"code-review","name":"代码评审清单","description":"接口改动逐项核对","contentMd":"## 步骤\n1. 错误码是否复用既有枚举","visibility":"agent"}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/api/v1/skills/<skillId>/publish" `
+  -Headers @{ Authorization = "Bearer $jwt" }
+
+# 13. 风格规则：新建后是 candidate，批准才会进入上下文
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/style-rules `
+  -Headers @{ Authorization = "Bearer $jwt" } -ContentType 'application/json; charset=utf-8' `
+  -Body '{"ruleKey":"answer_format","ruleValue":"先给结论再给理由","confidence":0.8,"visibility":"agent"}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/api/v1/style-rules/<ruleId>/approve" `
+  -Headers @{ Authorization = "Bearer $jwt" }
+```
+
+Agent 侧读 Skill 不走 REST：`get_skills` 工具与 `pwt://skills/list` 资源都需要 `skill:read`，
+后者只给摘要（不含 `content_md` 正文），要正文按 ID 调 `get_skills`。
+
+步骤 1–13 对应的接口能力已全部实测通过（见「已验证」）。PowerShell 传 JSON 请求体时建议写入文件后用
 `--data-binary "@file"` 或 `[Text.Encoding]::UTF8.GetBytes($json)`，避免编码与转义导致
 400 请求体格式错误：`powershell.exe`（5.1）按 ANSI 读取无 BOM 的 UTF-8 脚本，脚本里的中文
 请求体会在发送前就被破坏。
@@ -196,6 +217,7 @@ src/main/java/com/example/pwt
 ├── work          项目、工作记录（录入 / 分页 / 详情 / 标签 / 全文检索 / 归档）
 ├── memory        记忆候选、敏感检测、去重冲突、风险分级、审核与版本
 ├── context       Context Builder：检索串组装、加权评分、去相似、Token 预算与访问审计
+├── skill         Skill（工作方法）：草稿 / 发布 / 归档、版本、全文召回与 LIKE 兜底
 ├── task          异步任务表、领取事务、Worker 与租约回收
 ├── llm           LLM Provider 抽象、OpenAI 兼容实现、提示词模板
 ├── publicweb     匿名公开入口
@@ -208,11 +230,12 @@ src/main/java/com/example/pwt
 不需要反向依赖 `memory`。
 
 `context` 对应设计文档 7 的 context 模块。约束表
-（`pt_constraint`）与风格规则表（`pt_style_rule`）的实体暂放本模块：MVP 只有 Context Builder
-读取它们，等 M7 有维护接口时再归入各自的模块。
+（`pt_constraint`）与风格规则表（`pt_style_rule`）的实体与读取方都在本模块：M7 的风格规则
+维护接口（`StyleRuleService` / `StyleRuleController`）因此也留在 `context`——设计文档 7 的模块表
+里没有独立 style 模块，为它新建包只会让同一张表的代码分裂在两个模块里。
 
 `mcp` 是设计文档 7 的 mcp 模块，只做协议接入与权限透传，业务一律调用各领域服务，
-不在本模块写查询。M7+ 的 `skill`、`report` 继续补充。
+不在本模块写查询。`report` 属 M8，尚未建立。
 
 ## M1 已落实的设计约束
 
@@ -302,7 +325,7 @@ src/main/java/com/example/pwt
   `LIKE` 兜底命中记固定低分；新近度与使用信号用半衰期衰减而不是线性截断，
   避免阈值附近排序抖动。权重固化在 `ContextWeights`，可调旋钮（候选数、类型配额）走配置。
 - **约束是硬规则而不是排序项**（11.5）：预算按 画像/项目 → 约束 → 风格 → 相关记忆 自上而下分配，
-  前几段先扣，保证预算再紧也不会把用户红线挤掉。
+  前几段先扣，保证预算再紧也不会把用户红线挤掉（M7 起 Skill 段再排在相关记忆之后）。
 - **类型配额防止一类记忆吃满预算**：经验类条数最多、句子最长，纯按分数填充会把偏好与决策挤光，
   因此 `pwt.context.type-quotas` 给每类封顶，被挤掉的条数在 `dropped_by_quota` 里报出。
 - **最高分条目超预算时不整段清空**：跳过它继续装下一条。端到端实测到旧写法在预算 500 时
@@ -340,7 +363,8 @@ src/main/java/com/example/pwt
 - **业务失败不是协议错误**：scope 不足、参数非法转成 `isError=true` + 错误码 + 中文原因，
   让 Agent 有机会自我修正；只有非预期异常才走 JSON-RPC 层，且只回通用提示，堆栈留在服务端。
 - **MVP 只注册 6 个工具**：`get_profile`、`get_resume_url`、`capture_work_log`、`propose_memory`、
-  `search_memories`、`build_context`。Skill 与报告分别属于 M7、M8，提前注册会让 Agent 调到空实现。
+  `search_memories`、`build_context`（M7 起补上 `get_skills`，共 7 个）。报告类工具属 M8，
+  与其注册一个恒返回空的占位工具，不如让它在 `tools/list` 里干脆不出现。
 - **写工具不给 `public` 可见性**（9.6）：Schema 的 enum 里就只有 `private` / `agent`，
   否则客户端要先猜、再被服务端拒一次。
 - **入参用 snake_case，输出复用 REST 的 DTO**：入参是 MCP 约定，输出与 REST 保持一致，
@@ -348,12 +372,52 @@ src/main/java/com/example/pwt
 - **模板资源必须展开成具体 URI 注册**（9.2）：SDK 的 `resources/read` 只匹配**已注册资源**的
   URI 模板，`resources/templates/list` 的清单只用于展示。因此 `pwt://memory/approved/{memory_type}`
   按六种记忆类型逐个注册，非法类型自然落到“资源不存在”，而不是静默返回空列表。
-- **资源覆盖 9.2 表中除 `pwt://skills/list` 以外的全部 URI**：六个固定资源
-  （`profile/identity`、`profile/resume`、`profile/style`、`profile/constraints`、
-  `memory/approved`、`work/recent`）加一个按类型模板。`skills/list` 属 M7，
-  现在注册会指向空实现。可见性一律交给服务层判定，MCP 侧不另写一套。
+- **资源覆盖 9.2 表的全部 URI**：六个固定资源（`profile/identity`、`profile/resume`、
+  `profile/style`、`profile/constraints`、`memory/approved`、`work/recent`）加一个按类型模板，
+  M7 补上 `pwt://skills/list`，合计 13 个可读资源。可见性一律交给服务层判定，MCP 侧不另写一套。
 - **默认关闭**（`pwt.mcp.enabled=false`）：未做 TLS 与限流前不随 REST 一起对外暴露，
   关闭时 `/mcp` 返回 404，REST 与契约测试均不受影响。
+
+## M7 已落实的设计约束
+
+- **不需要新迁移**：`pt_skill`（V5）与 `pt_style_rule`（V6）在 M1 建库时就已就位，M7 补的是
+  写入方与读取方。索引层面只做了核对：`ft_skill_text` 确认覆盖 `name`、`description`、
+  `content_md` 三列，只检索正文会让「按名称找流程」这种最常见的用法落空。
+- **已发布内容不可就地改写**（15.2「Skill 发布前由 Owner 审核」）：草稿原地改；
+  对已发布的 Skill 调 `PUT` 会新建 `version + 1` 的草稿并原样返回它，原已发布行不动。
+  否则 Agent 正在用的流程会在两次调用之间被换掉，那次改写实际绕过了发布这道审核。
+- **发布即切换**：`publish` 在同一事务内把同 slug 的其它已发布版本转 `archived`，
+  保证同一 slug 最多一条生效，避免同一流程的两个版本同时注入上下文。
+- **归档不能直接发布**：归档表达「这套做法不再适用」，重新启用要显式新建版本，
+  避免一次误点让过时流程回到 Agent 上下文。归档与重复发布都是幂等或明确报错，不静默通过。
+- **版本号取历史最大值 + 1**，不过滤状态：草稿、已发布、归档都占着
+  `uq_skill_user_slug_version` 的位置，从最大值往后分配才不会再撞唯一键。
+- **slug 必须由 Owner 显式给出**（`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`）：名称允许中文，
+  按 ASCII 自动推导的结果往往只剩一串连字符，既不稳定也不可辨识，不如直接报错让 Owner 起一个。
+  大小写与连续连字符归一（`Hand--Off` → `hand-off`），避免同一流程出现两个 slug。
+- **写入侧只有 Owner**（10.2）：`POST` / `PUT` / `publish` / `archive` 对 Agent 一律 403，
+  Agent 经 MCP 读（`get_skills` + `pwt://skills/list`，均需 `skill:read`），不能自己给自己加流程。
+  草稿对 Agent 按不存在处理（404）——拿到没审完的流程正是 15.2 要避免的事。
+- **`pwt://skills/list` 只给摘要**：`content_md` 是 `mediumtext`，一条流程正文就能上万字，
+  列举场景把正文全灌进响应，Agent 光传输就要花掉预算。要正文按 ID 调 `get_skills`。
+- **`get_skills` 的取值校验放在服务层而不是 MCP 层**，与 `ContextSearchService.search` 同构：
+  REST 与 MCP 两条入口必须得到完全一致的判定结果（9.1）。`query` 与 `skill_ids` 同时给出时
+  取交集而不是忽略其一——Agent 说「上次那几篇里跟部署相关的挑出来」，忽略任一条件都是曲解它的意思；
+  ID 白名单里已归档或已失效的条目静默跳过，避免跨会话的时间差把 Agent 卡在重试上。
+- **召回沿用 M5 机制**：检索串由 `ContextQuery` 组装后走布尔模式，空转补 `LIKE` 兜底并记路径；
+  全文索引列覆盖三列，兜底语句用 `idx_skill_user_status` 先按 `user_id + status` 收敛扫描范围。
+- **Skill 注入位次排在相关记忆之后**（11.5：Skill 是「补充怎么做」，记忆是「用户是谁、要什么」）：
+  按条给预算，**装不下整条就不装**并在 `truncated_sections` 标 `skills`——Markdown 流程被截成
+  半截会误导 Agent 以为那就是完整步骤。单条注入文本上限 2000 字符（记忆是 600），
+  条数上限 `pwt.context.max-skills`（默认 3）。
+- **`context_meta.selected_count` 仍只算记忆段**，不改变 M5 语义；本次注入了哪些 Skill 由
+  `skills` 数组与 `pt_context_access_log.skill_ids` 表达。`include_skills=false` 时连边界标记一并省略。
+- **风格规则状态只有 `candidate → approved | archived`**：服务端不强设 `sourceCount` /
+  `confidence` 阈值——6.3 的证据条数规则只针对记忆，而风格规则目前没有任何自动产出方
+  （M4 的提取只产六类记忆），规则全部由 Owner 手写，再拿阈值卡自己写的规则没有意义。
+  两个数值仅作 Owner 的判据展示。
+- **风格规则的读取方只有 Context Builder 与 `pwt://profile/style`**，且只看 `approved`；
+  每用户内 `rule_key` 唯一（`uq_style_rule_user_key`），不允许同键两行让 Builder 无所适从。
 
 ## 已验证
 
@@ -363,7 +427,7 @@ src/main/java/com/example/pwt
 - 错误码映射生效：缺凭证与非法令牌 401 `UNAUTHENTICATED`；字段校验 400 `VALIDATION_ERROR`
   并带字段级 `details`；请求体 JSON 不可解析 400（不是 500）。
 - Owner JWT 与 Agent API Key 按前缀分流到两条独立鉴权路径，互不混用。
-- Flyway 8 个迁移在 MySQL 9.3.0 上执行成功，`personal_test` 生成 17 张业务表 + 历史表。
+- Flyway 10 个迁移在 MySQL 9.3.0 上执行成功，`personal_test` 生成 17 张业务表 + 历史表。
 - 空库引导创建 Owner，登录后返回 JWT（`expiresAt` 为 12 小时后）。
 - 端到端链路：登录 → 签发 Agent Key（201，明文仅返回一次）→ 用 Agent Key 访问 `whoami`
   返回 `actorType=AGENT` 及其 scopes → 撤销 → 再用同一 Key 访问返回 401。全流程 833ms。
@@ -447,6 +511,30 @@ src/main/java/com/example/pwt
   `pwt://memory/approved/{memory_type}` 一律报“资源不存在”，已按类型展开注册并由
   `McpResourceCatalogTest` 锁死“清单与可读性必须同时成立”。
 
+- **M7 端到端**（真实 MySQL `personal_test` + MCP 协议往返，32 项断言全通过）：
+  Owner 建 Skill 为 `draft` / `version=1`；草稿阶段 Agent 的 `get_skills` 返回 0 条、
+  REST 详情 404，而 Owner 列表可见；草稿 `PUT` 原地改（id 与 version 不变）；
+  `publish` 后对已发布行再 `PUT` 返回 `version=2` 的**新**草稿且原行仍为 `published`，
+  对已发布行重复 `publish` 返回 400「只有草稿可以发布，当前状态为 published」；
+  Agent 按 ID 读到完整正文、按中文关键词（`错误码 多租户 TypeHandler`）召回命中，
+  `query` + `skill_ids` 取交集（指向草稿 ID 时为空）；
+  `tools/list` 7 个工具、`resources/list` 13 个资源，`pwt://skills/list` 只返回摘要字段
+  （`id,slug,name,description,version,visibility,updatedAt`，无 `contentMd`）；
+  `build_context` 的 `skills` 段注入 3 条，`pt_context_access_log.skill_ids` 落库为真实 ID 数组；
+  上万字的长 Skill 在 `token_budget=500` 下**整条不装**（该条不在 `skills` 里）且
+  `truncated_sections=["skills"]`，而同时召回的短流程仍照常装入（估算 112 token）；
+  预算 4000 时长流程装入并被截到 1902 字符（上限 2000）；
+  `include_skills=false` 时 `skills` 为空且边界标记一并省略；
+  Agent 调 `POST /api/v1/skills` 与 `POST /api/v1/style-rules` 均 403；
+  缺 `skill:read` 的 Key 调 `get_skills` 返回 `isError=true` + `SCOPE_REQUIRED`，
+  读 `pwt://skills/list` 同样拿到带 `SCOPE_REQUIRED` 的信封；
+  风格规则新建为 `candidate` 且不进上下文，`approve` 后同时出现在 `pwt://profile/style`
+  与 `build_context.style_rules`（`{"key":"m7_e2e_answer_format_*","value":"先给结论再给理由，代码用中文注释"}`）；
+  归档后 `get_skills` 立即查不到该条。
+- 索引核对：`information_schema.STATISTICS` 确认 `pt_skill` 的 `ft_skill_text` 覆盖
+  `name`、`description`、`content_md` 三列；`MysqlDdlMigrationTest` 新增两个用例锁死这一点
+  （中文三列分别命中；同 slug 多版本可共存而同 `(user_id, slug, version)` 被唯一键拒绝）。
+
 ## 已知限制
 
 - 目标实例 MySQL 9.3.0 高于 Flyway 9.22.3 官方支持上限（8.0），启动会输出
@@ -465,7 +553,19 @@ src/main/java/com/example/pwt
 - 设计文档 10.2 的 `GET /api/v1/audit-logs` 尚未实现（当前只有写入侧），调用返回 404「接口不存在」，
   随 M9 的安全加固一并补齐。
 - 工作记录尚无修改正文与逻辑删除接口，M3 只覆盖录入、读取、检索、可见性与归档。
-- `build_context` 的 `skills` 段恒为空数组：Skill 的 CRUD 与检索在 M7，届时接入本模块的注入位。
+- **默认预算下 Skill 很可能一条都注入不进去**：Skill 段排在相关记忆之后，
+  `default-token-budget` 又是 4000，真实语料的记忆段几乎必然吃满剩余预算。
+  端到端是用「上万字长 Skill + 预算 500」构造出截断路径的，还没有用真实语料测过
+  「该给 Agent 的流程实际给到了」。若要让 Skill 稳定进入上下文，需要给 Skill 段留最低配额
+  或允许 Agent 显式请求，二者都要先改 11.5 的位次约定。
+- **`get_skills` 返回完整 `mediumtext` 正文**：一次最多 10 条（上限 50），
+  若 Owner 写入过长流程，单次工具响应可能远大于 `build_context` 的预算口径——
+  MCP 侧没有对正文再截断，靠 `pwt://skills/list`（摘要）缓解。
+- **风格规则目前没有任何自动产出方**：M4 的 LLM 提取只产六类记忆，`pt_style_rule` 的行
+  只能由 Owner 手工写入，`source_count` 恒为 1、`confidence` 由 Owner 自报。
+  「从工作记录里归纳风格」还没有实现。
+- Agent 侧没有 Skill 的 REST 读取入口（按 10.2 设计如此：Agent 走 MCP），
+  `GET /api/v1/skills` 对 Agent 恒为 403，前端之外若要用 HTTP 读 Skill 只能走 Owner 会话。
 - 相关性排序尚未做过召回质量评测：权重与配额取自设计文档 11.4/11.5 的建议值，
   只用构造数据验证过相对顺序，没有用真实语料测过“该召回的没召回”。
 - Token 估算是字符分档估算（CJK 每字 1 token、ASCII 每 4 字符 1 token）而不是模型 tokenizer，

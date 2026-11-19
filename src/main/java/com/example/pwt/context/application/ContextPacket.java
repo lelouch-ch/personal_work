@@ -76,7 +76,8 @@ public record ContextPacket(Profile profile, List<Item> constraints, List<StyleR
      * 进而向用户给出没有依据的结论。
      *
      * @param totalCandidates 召回候选总数，去重之前
-     * @param selectedCount   实际注入条数
+     * @param selectedCount   实际注入的<b>相关记忆</b>条数；约束、风格规则与 Skill 不计入，
+     *                        它们的条数直接看各自的数组，口径与 M5 起保持一致
      * @param tokenBudget     本次预算
      * @param tokenEstimate   估算 Token 数
      * @param recallPath      召回路径：{@code full_text} 或 {@code like}
@@ -104,5 +105,8 @@ public record ContextPacket(Profile profile, List<Item> constraints, List<StyleR
 
         /** 段落标识：项目背景。 */
         public static final String SECTION_PROJECT = "project";
+
+        /** 段落标识：Skill。 */
+        public static final String SECTION_SKILLS = "skills";
     }
 }
