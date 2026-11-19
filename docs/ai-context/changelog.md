@@ -4,7 +4,7 @@
 
 ## 里程碑 7 - 2026-11-19 Skill 与工作风格
 
-- 提交：待填
+- 提交：`a07e8dc`
 - Added: `skill` 模块（`SkillStatus` / `SkillSlug` / `SkillEntity` / `SkillMapper` /
   `SkillService` / `SkillRecallService` / `SkillController` 与 DTO）；
   接口 `GET|POST /api/v1/skills`、`GET|PUT /api/v1/skills/{id}`、
